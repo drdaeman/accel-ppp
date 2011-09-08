@@ -311,6 +311,9 @@ static void ppp_terminate_sec(struct ppp_t *ppp)
 static void __ppp_auth_started(struct ppp_t *ppp)
 {
 	struct auth_layer_data_t *ad = container_of(ppp_find_layer_data(ppp, &auth_layer), typeof(*ad), ld);
+	
+	if (ppp->terminating)
+		return;
 
 	log_ppp_debug("auth_layer_started\n");
 	ppp_layer_started(ppp, &ad->ld);
