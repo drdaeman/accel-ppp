@@ -124,7 +124,12 @@ static void rad_acct_timeout(struct triton_timer_t *t)
 	__sync_add_and_fetch(&stat_interim_lost, 1);
 	stat_accm_add(stat_interim_lost_1m, 1);
 	stat_accm_add(stat_interim_lost_5m, 1);
-	
+
+	if (conf_acct_timeout == 0) {
+		triton_timer_del(t);
+		return;
+	}
+
 	time(&ts);
 
 	dt = ts - req->rpd->acct_timestamp;
@@ -178,10 +183,8 @@ static void rad_acct_interim_update(struct triton_timer_t *t)
 	req_set_RA(rpd->acct_req, conf_acct_secret);
 	rad_req_send(rpd->acct_req, conf_interim_verbose);
 	__sync_add_and_fetch(&stat_interim_sent, 1);
-	if (conf_acct_timeout) {
-		rpd->acct_req->timeout.period = conf_timeout * 1000;
-		triton_timer_add(rpd->ppp->ctrl->ctx, &rpd->acct_req->timeout, 0);
-	}
+	rpd->acct_req->timeout.period = conf_timeout * 1000;
+	triton_timer_add(rpd->ppp->ctrl->ctx, &rpd->acct_req->timeout, 0);
 }
 
 int rad_acct_start(struct radius_pd_t *rpd)
