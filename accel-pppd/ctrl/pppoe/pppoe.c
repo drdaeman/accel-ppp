@@ -12,6 +12,7 @@
 #include <netpacket/packet.h>
 #include <arpa/inet.h>
 #include <printf.h>
+#include <ctype.h>
 
 #include "crypto.h"
 
@@ -74,12 +75,13 @@ struct padi_t
 };
 
 int conf_verbose;
-char *conf_service_name;
 char *conf_ac_name;
 int conf_ifname_in_sid;
 char *conf_pado_delay;
 int conf_tr101 = 1;
 int conf_padi_limit = 0;
+int conf_reply_exact_service = 0;
+char *conf_service_names[MAX_SERVICE_NAMES];
 
 static mempool_t conn_pool;
 static mempool_t pado_pool;
@@ -581,16 +583,25 @@ static void pppoe_send_PADO(struct pppoe_serv_t *serv, const uint8_t *addr, cons
 {
 	uint8_t pack[ETHER_MAX_LEN];
 	uint8_t cookie[COOKIE_LENGTH];
+	char **service_names = NULL;
+	int i;
 
 	setup_header(pack, serv->hwaddr, addr, CODE_PADO, 0);
 
 	add_tag(pack, TAG_AC_NAME, (uint8_t *)conf_ac_name, strlen(conf_ac_name));
-	if (conf_service_name)
-		add_tag(pack, TAG_SERVICE_NAME, (uint8_t *)conf_service_name, strlen(conf_service_name));
 
 	if (service_name)
 		add_tag2(pack, service_name);
-	
+	if (!service_name || !conf_reply_exact_service) {
+		if (serv->service_names[0])
+			service_names = serv->service_names;
+		else if (conf_service_names[0])
+			service_names = conf_service_names;
+		if (service_names)
+			for (i = 0; i < MAX_SERVICE_NAMES && service_names[i]; i++)
+				add_tag(pack, TAG_SERVICE_NAME, (uint8_t *)service_names[i], strlen(service_names[i]));
+	}
+
 	generate_cookie(serv, addr, cookie);
 	add_tag(pack, TAG_AC_COOKIE, cookie, COOKIE_LENGTH);
 
@@ -765,8 +776,9 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	struct pppoe_tag *host_uniq_tag = NULL;
 	struct pppoe_tag *relay_sid_tag = NULL;
 	struct pppoe_tag *service_name_tag = NULL;
-	int n, service_match = 0;
+	int n, i, service_match = 0;
 	struct delayed_pado_t *pado;
+	char **service_names = NULL;
 
 	__sync_add_and_fetch(&stat_PADI_recv, 1);
 
@@ -788,19 +800,30 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 		print_packet(pack);
 	}
 	
+
+	if (serv->service_names[0])
+		service_names = serv->service_names;
+	else if (conf_service_names[0])
+		service_names = conf_service_names;
+
 	for (n = 0; n < ntohs(hdr->length); n += sizeof(*tag) + ntohs(tag->tag_len)) {
 		tag = (struct pppoe_tag *)(pack + ETH_HLEN + sizeof(*hdr) + n);
 		switch (ntohs(tag->tag_type)) {
 			case TAG_END_OF_LIST:
 				break;
 			case TAG_SERVICE_NAME:
-				if (conf_service_name && tag->tag_len) {
-					if (ntohs(tag->tag_len) != strlen(conf_service_name))
+				if (service_names && tag->tag_len) {
+					for (i = 0; i < MAX_SERVICE_NAMES && service_names[i]; i++) {
+						if (ntohs(tag->tag_len) != strlen(service_names[i]))
+							continue;
+						if (memcmp(tag->tag_data, service_names[i], ntohs(tag->tag_len)))
+							continue;
+						if (conf_reply_exact_service)
+							service_name_tag = tag;
+						service_match = 1;
 						break;
-					if (memcmp(tag->tag_data, conf_service_name, ntohs(tag->tag_len)))
-						break;
-					service_match = 1;
-				} else {
+					}
+				} else if (!serv->require_service_name) {
 					service_name_tag = tag;
 					service_match = 1;
 				}
@@ -869,9 +892,10 @@ static void pppoe_recv_PADR(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	struct pppoe_tag *ac_cookie_tag = NULL;
 	struct pppoe_tag *service_name_tag = NULL;
 	struct pppoe_tag *tr101_tag = NULL;
-	int n, service_match = 0;
+	int n, i, service_match = 0;
 	struct pppoe_conn_t *conn;
 	int vendor_id;
+	char **service_names = NULL;
 
 	__sync_add_and_fetch(&stat_PADR_recv, 1);
 
@@ -894,7 +918,12 @@ static void pppoe_recv_PADR(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 		log_info2("recv ");
 		print_packet(pack);
 	}
-	
+
+	if (serv->service_names[0])
+		service_names = serv->service_names;
+	else if (conf_service_names[0])
+		service_names = conf_service_names;
+
 	for (n = 0; n < ntohs(hdr->length); n += sizeof(*tag) + ntohs(tag->tag_len)) {
 		tag = (struct pppoe_tag *)(pack + ETH_HLEN + sizeof(*hdr) + n);
 		switch (ntohs(tag->tag_type)) {
@@ -904,12 +933,15 @@ static void pppoe_recv_PADR(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 				service_name_tag = tag;
 				if (tag->tag_len == 0)
 					service_match = 1;
-				else if (conf_service_name) {
-					if (ntohs(tag->tag_len) != strlen(conf_service_name))
+				else if (service_names) {
+					for (i = 0; i < MAX_SERVICE_NAMES && service_names[i]; i++) {
+						if (ntohs(tag->tag_len) != strlen(service_names[i]))
+							continue;
+						if (memcmp(tag->tag_data, service_names[i], ntohs(tag->tag_len)))
+							continue;
+						service_match = 1;
 						break;
-					if (memcmp(tag->tag_data, conf_service_name, ntohs(tag->tag_len)))
-						break;
-					service_match = 1;
+					}
 				} else {
 					service_match = 1;
 				}
@@ -1093,28 +1125,177 @@ static void pppoe_serv_close(struct triton_context_t *ctx)
 	pthread_mutex_unlock(&serv->lock);
 }
 
-static int parse_server(const char *opt, char **ifname, int *padi_limit)
+static int parse_interface(const char *opt, char **ifname, char **ifopt)
 {
-	char *str = _strdup(opt);
-	char *ptr1, *ptr2, *endptr;
+	char *comma;
 
-	ptr1 = strchr(str, ',');
-	if (ptr1) {
-		ptr2 = strstr(ptr1, ",padi-limit=");
-		*padi_limit = strtol(ptr2 + 12, &endptr, 10);
-		if (*endptr != 0 && *endptr != ',')
-			goto out_err;
+	*ifopt = NULL;
+	comma = strchr(opt, ',');
+	if (comma == opt) {
+		/* empty interface name, option starts with comma */
+		return -1;
+	} else if (comma) {
+		comma++;
+		if (*comma) {
+			if (strlen(comma) > 1024) {
+				/* options are too long */
+				return -1;
+			}
+			*ifopt = comma;
+		}
+		*ifname = _strndup(opt, comma - opt - 1);
+	} else {
+		*ifname = _strdup(opt);
+	}
+	return 0;
+}
 
-		*ptr1 = 0;
+int pppoe_add_service_name(char **list, const char *item)
+{
+	int i;
+
+	for (i = 0; i < MAX_SERVICE_NAMES; i++) {
+		if (!list[i]) {
+			list[i] = _strdup(item);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+int pppoe_del_service_name(char **list, const char *item)
+{
+	int i, found = -1;
+
+	for (i = 0; i < MAX_SERVICE_NAMES; i++) {
+		if (list[i] && !strcmp(list[i], item))
+			found = i;
+		if (found >= 0 && (!list[i] || i == MAX_SERVICE_NAMES-1)) {
+			_free(list[found]);
+			if (found != i)
+				list[found] = list[i];
+			list[i] = NULL;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static int parse_interface_set_option(struct pppoe_serv_t *serv, char *property, char *value, char *errbuf)
+{
+	if (!strcmp(property, "padi-limit")) {
+		serv->padi_limit = atol(value);
+		if (serv->padi_limit < 0) {
+			sprintf(errbuf, "Invalid padi-limit value %d", serv->padi_limit);
+			return 0;
+		}
+	} else if (!strcmp(property, "require-service-name") || !strcmp(property, "require-sn")) {
+		serv->require_service_name = !!atoi(value);
+	} else if (!strcmp(property, "service-name")) {
+		if (pppoe_add_service_name(serv->service_names, value)) {
+			sprintf(errbuf, "Cannot add Service-Name '%s'", value);
+			return 0;
+		}
+	} else {
+		sprintf(errbuf, "Unknown option: '%s'", property);
+		return 0;
+	}
+	return -1;
+}
+
+enum parse_ifopt_state {
+	PIS_Property = 0,
+	PIS_AnyValue,
+	PIS_QuotedValue,
+	PIS_UnquotedValue,
+	PIS_ExpectComma
+};
+
+static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv, char **errmsg)
+{
+	enum parse_ifopt_state state = PIS_Property;
+	char *str = _strdup(ifopt);
+	char *cur, *start, *property;
+	char error[1280];
+	char c;
+	int running = -1;
+
+	*error = 0;
+	start = cur = str;
+	while (running) {
+		c = *cur;
+		switch (state) {
+			case PIS_Property:
+				if (!c) {
+					running = 0;
+				} else if (c == '=') {
+					property = start;
+					*cur = 0;
+					state = PIS_AnyValue;
+				} else if (c == ',') {
+					property = start;
+					*cur = 0;
+					running = parse_interface_set_option(serv, property, "1", error);
+					start = cur + 1;
+				} else if (!(isalpha(c) || isdigit(c) || c == '-')) {
+					sprintf(error, "Invalid character 0x%02x in property name at offset %ld", c, cur - str);
+					running = 0;
+				}
+				break;
+			case PIS_AnyValue:
+				if (!c || c == ',') {
+					running = parse_interface_set_option(serv, property, "", error);
+					if (!c) { running = 0; }
+				} else if (c == '"') {
+					start = cur + 1;
+					state = PIS_QuotedValue;
+				} else {
+					start = cur;
+					state = PIS_UnquotedValue;
+				}
+				break;
+			case PIS_QuotedValue:
+				if (!c) {
+					sprintf(error, "Unexpected end-of-string while parsing value for '%s'", property);
+					running = 0;
+				} else if (c == '"') {
+					*cur = 0;
+					running = parse_interface_set_option(serv, property, start, error);
+					state = PIS_ExpectComma;
+				}
+				break;
+			case PIS_UnquotedValue:
+				if (!c || c == ',') {
+					*cur = 0;
+					running = parse_interface_set_option(serv, property, start, error);
+					if (!c) { running = 0; }
+					start = cur + 1;
+					state = PIS_Property;
+				}
+				break;
+			case PIS_ExpectComma:
+				if (!c || c == ',') {
+					start = cur + 1;
+					state = PIS_Property;
+					if (!c) { running = 0; }
+				} else {
+					sprintf(error, "Expected comma or end-of-string but got 0x%02x at offset %ld", c, cur - str);
+					running = 0;
+				}
+				break;
+			default:
+				sprintf(error, "Bug in parse_interface_options: parser ran into unknown state %d", state);
+				running = 0;
+		}
+		if (running) { cur++; }
 	}
 
-	*ifname = str;
-
-	return 0;
-
-out_err:
 	_free(str);
-	return -1;
+	if (*error) {
+		*errmsg = _strdup(error);
+		return -1;
+	}
+	return 0;
 }
 
 void pppoe_server_start(const char *opt, void *cli)
@@ -1124,10 +1305,9 @@ void pppoe_server_start(const char *opt, void *cli)
 	int f = 1;
 	struct ifreq ifr;
 	struct sockaddr_ll sa;
-	char *ifname;
-	int padi_limit = conf_padi_limit;
+	char *ifname, *ifopt, *errmsg;
 
-	if (parse_server(opt, &ifname, &padi_limit)) {
+	if (parse_interface(opt, &ifname, &ifopt)) {
 		if (cli)
 			cli_sendv(cli, "failed to parse '%s'\r\n", opt);
 		else
@@ -1236,6 +1416,17 @@ void pppoe_server_start(const char *opt, void *cli)
 		goto out_err;
 	}
 
+	serv->padi_limit = conf_padi_limit;
+
+	if (ifopt && parse_interface_options(ifopt, serv, &errmsg)) {
+		if (cli)
+			cli_sendv(cli, "%s\r\n", errmsg);
+		else
+			log_error("pppoe: %s\r\n", errmsg);
+		_free(errmsg);
+		goto out_err;
+	}
+
 	serv->ctx.close = pppoe_serv_close;
 	serv->ctx.before_switch = log_switch;
 	serv->hnd.fd = sock;
@@ -1246,7 +1437,6 @@ void pppoe_server_start(const char *opt, void *cli)
 	INIT_LIST_HEAD(&serv->conn_list);
 	INIT_LIST_HEAD(&serv->pado_list);
 	INIT_LIST_HEAD(&serv->padi_list);
-	serv->padi_limit = padi_limit;
 
 	triton_context_register(&serv->ctx, NULL);
 	triton_md_register_handler(&serv->ctx, &serv->hnd);
@@ -1293,6 +1483,7 @@ static void _server_stop(struct pppoe_serv_t *serv)
 void pppoe_server_free(struct pppoe_serv_t *serv)
 {
 	struct delayed_pado_t *pado;
+	int i;
 
 	pthread_rwlock_wrlock(&serv_lock);
 	list_del(&serv->entry);
@@ -1306,6 +1497,12 @@ void pppoe_server_free(struct pppoe_serv_t *serv)
 	triton_md_unregister_handler(&serv->hnd);
 	close(serv->hnd.fd);
 	triton_context_unregister(&serv->ctx);
+	for (i = 0; i < MAX_SERVICE_NAMES; i++) {
+		if (serv->service_names[i]) {
+			_free(serv->service_names[i]);
+			serv->service_names[i] = NULL;
+		}
+	}
 	_free(serv->ifname);
 	_free(serv);
 }
@@ -1364,13 +1561,11 @@ static void load_config(void)
 	} else
 		conf_ac_name = _strdup("accel-ppp");
 
-	opt = conf_get_opt("pppoe", "service-name");
+	opt = conf_get_opt("pppoe", "reply-exact-service");
 	if (!opt)
-		opt = conf_get_opt("pppoe", "Service-Name");
+		opt = conf_get_opt("pppoe", "Reply-Exact-Service");
 	if (opt) {
-		if (conf_service_name)
-			_free(conf_service_name);
-		conf_service_name = _strdup(opt);
+		conf_reply_exact_service = !!atoi(opt);
 	}
 
 	opt = conf_get_opt("pppoe", "ifname-in-sid");
@@ -1415,11 +1610,14 @@ static void pppoe_init(void)
 		log_emerg("pppoe: no configuration, disabled...\n");
 		return;
 	}
-	
+
 	list_for_each_entry(opt, &s->items, entry) {
-		if (!strcmp(opt->name, "interface")) {
-			if (opt->val)
+		if (opt->val) {
+			if (!strcmp(opt->name, "interface")) {
 				pppoe_server_start(opt->val, NULL);
+			} else if (!strcmp(opt->name, "service-name") || !strcmp(opt->name, "Service-Name")) {
+				pppoe_add_service_name(conf_service_names, opt->val);
+			}
 		}
 	}
 

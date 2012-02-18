@@ -46,6 +46,7 @@
 #define MAX_SID 65534
 #define SECRET_LENGTH 16
 #define COOKIE_LENGTH 24
+#define MAX_SERVICE_NAMES 8
 
 struct pppoe_tag_t
 {
@@ -70,6 +71,8 @@ struct pppoe_serv_t
 	struct triton_md_handler_t hnd;
 	uint8_t hwaddr[ETH_ALEN];
 	char *ifname;
+	int require_service_name:1;
+	char *service_names[MAX_SERVICE_NAMES];
 
 	uint8_t secret[SECRET_LENGTH];
 	DES_key_schedule des_ks;
@@ -90,7 +93,7 @@ struct pppoe_serv_t
 };
 
 extern int conf_verbose;
-extern char *conf_service_name;
+extern char *conf_service_names[MAX_SERVICE_NAMES];
 extern char *conf_ac_name;
 extern char *conf_pado_delay;
 
@@ -109,6 +112,9 @@ extern struct list_head serv_list;
 int mac_filter_check(const uint8_t *addr);
 void pppoe_server_start(const char *intf, void *client);
 void pppoe_server_stop(const char *intf);
+
+int pppoe_add_service_name(char **list, const char *item);
+int pppoe_del_service_name(char **list, const char *item);
 
 extern int pado_delay;
 void dpado_check_next(int conn_cnt);

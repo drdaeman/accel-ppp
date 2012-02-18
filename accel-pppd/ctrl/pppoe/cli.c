@@ -13,22 +13,54 @@
 static void show_interfaces(void *cli)
 {
 	struct pppoe_serv_t *serv;
+	int i, count;
 
-	cli_send(cli, "interface:   connections:    state:\r\n");
-	cli_send(cli, "-----------------------------------\r\n");
+	cli_send(cli, "interface:   connections:    state:    service-name:\r\n");
+	cli_send(cli, "----------------------------------------------------\r\n");
 
 	pthread_rwlock_rdlock(&serv_lock);
 	list_for_each_entry(serv, &serv_list, entry) {
-		cli_sendv(cli, "%9s    %11u    %6s\r\n", serv->ifname, serv->conn_cnt, serv->stopping ? "stop" : "active");
+		count = 0;
+		for (i = 0; i < MAX_SERVICE_NAMES && serv->service_names[i]; i++)
+			count++;
+		cli_sendv(cli, "%9s    %11u    %6s    %9s, %2d\r\n", serv->ifname, serv->conn_cnt, serv->stopping ? "stop" : "active",
+		          serv->require_service_name ? "require" : "default", count);
 	}
 	pthread_rwlock_unlock(&serv_lock);
 }
 
+static void show_interface_service_names(const char *ifname, void *cli)
+{
+	struct pppoe_serv_t *serv;
+	int i, found = 0;
+
+	pthread_rwlock_rdlock(&serv_lock);
+	list_for_each_entry(serv, &serv_list, entry) {
+		if (!strcmp(serv->ifname, ifname)) {
+			if (serv->service_names[0]) {
+				for (i = 0; i < MAX_SERVICE_NAMES && serv->service_names[i]; i++)
+					cli_sendv(cli, "%d: %s\r\n", i, serv->service_names[i]);
+			} else {
+				cli_send(cli, "*\r\n");
+			}
+			found = 1;
+			break;
+		}
+	}
+	pthread_rwlock_unlock(&serv_lock);
+
+	if (!found) {
+		cli_sendv(cli, "interface %s not found\r\n", ifname);
+	}
+}
+
 static void intf_help(char * const *fields, int fields_cnt, void *client)
 {
-	cli_send(client, "pppoe interface add <name> - start pppoe server on specified interface\r\n");
-	cli_send(client, "pppoe interface del <name> - stop pppoe server on specified interface and drop his connections\r\n");
+	cli_send(client, "pppoe interface add <ifname> - start pppoe server on specified interface\r\n");
+	cli_send(client, "pppoe interface del <ifname> - stop pppoe server on specified interface and drop his connections\r\n");
 	cli_send(client, "pppoe interface show - show interfaces on which pppoe server started\r\n");
+	cli_send(client, "pppoe interface show <ifname> Service-Name - show interface Service-Names\r\n");
+	//cli_send(client, "pppoe interface set <ifname> Service-Name <name>[ <name>[ ...]] - set Service-Names to respond on interface\r\n");
 }
 
 static int intf_exec(const char *cmd, char * const *fields, int fields_cnt, void *client)
@@ -42,6 +74,18 @@ static int intf_exec(const char *cmd, char * const *fields, int fields_cnt, void
 		else
 			goto help;
 
+		return CLI_CMD_OK;
+	}
+
+	if (fields_cnt == 5) {
+		if (!strcmp(fields[2], "show")) {
+			if (!strcmp(fields[4], "Service-Name"))
+				show_interface_service_names(fields[3], client);
+			else
+				goto help;
+		} else {
+			goto help;
+		}
 		return CLI_CMD_OK;
 	}
 
@@ -83,12 +127,12 @@ static void set_verbose_help(char * const *f, int f_cnt, void *cli)
 {
 	cli_send(cli, "pppoe set verbose <n> - set verbosity of pppoe logging\r\n");
 	cli_send(cli, "pppoe set PADO-delay <delay[,delay1:count1[,delay2:count2[,...]]]> - set PADO delays (ms)\r\n");
-	cli_send(cli, "pppoe set Service-Name <name> - set Service-Name to respond\r\n");
+	cli_send(cli, "pppoe set Service-Name <name>[ <name> [...]] - set Service-Names to respond\r\n");
 	cli_send(cli, "pppoe set Service-Name * - respond with client's Service-Name\r\n");
 	cli_send(cli, "pppoe set AC-Name <name> - set AC-Name tag value\r\n");
 	cli_send(cli, "pppoe show verbose - show current verbose value\r\n");
 	cli_send(cli, "pppoe show PADO-delay - show current PADO delay value\r\n");
-	cli_send(cli, "pppoe show Service-Name - show current Service-Name value\r\n");
+	cli_send(cli, "pppoe show Service-Name - show current Service-Names\r\n");
 	cli_send(cli, "pppoe show AC-Name - show current AC-Name tag value\r\n");
 }
 
@@ -114,14 +158,17 @@ static int show_pado_delay_exec(const char *cmd, char * const *f, int f_cnt, voi
 
 static int show_service_name_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
 {
+	int i;
+
 	if (f_cnt != 3)
 		return CLI_CMD_SYNTAX;
-	
-	if (conf_service_name)
-		cli_sendv(cli, "%s\r\n", conf_service_name);
+
+	if (conf_service_names[0])
+		for (i = 0; i < MAX_SERVICE_NAMES && conf_service_names[i]; i++)
+			cli_sendv(cli, "%d: %s\r\n", i, conf_service_names[i]);
 	else
-		cli_sendv(cli, "*\r\n", conf_service_name);
-	
+		cli_send(cli, "*\r\n");
+
 	return CLI_CMD_OK;
 }
 
@@ -163,17 +210,26 @@ static int set_pado_delay_exec(const char *cmd, char * const *f, int f_cnt, void
 
 static int set_service_name_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
 {
-	if (f_cnt != 4)
-		return CLI_CMD_SYNTAX;
-	
-	if (conf_service_name)
-		_free(conf_service_name);
+	int i;
 
-	if (!strcmp(f[3], "*"))
-		conf_service_name = NULL;
-	else
-		conf_service_name = _strdup(f[3]);
-	
+	if (f_cnt < 4)
+		return CLI_CMD_SYNTAX;
+	if (f_cnt > MAX_SERVICE_NAMES + 4)
+		return CLI_CMD_INVAL;
+
+	for (i = 0; i < MAX_SERVICE_NAMES; i++) {
+		if (conf_service_names[i]) {
+			_free(conf_service_names[i]);
+			conf_service_names[i] = NULL;
+		}
+	}
+
+	if (f_cnt > 4 || strcmp(f[3], "*") != 0) {
+		for (i = 3; i < f_cnt; i++) {
+			conf_service_names[i-3] = _strdup(f[i]);
+		}
+	}
+
 	return CLI_CMD_OK;
 }
 
