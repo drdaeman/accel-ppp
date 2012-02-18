@@ -303,7 +303,7 @@ static void set_hdr(struct log_msg_t *msg, struct ppp_t *ppp)
 
 static void general_log(struct log_target_t *t, struct log_msg_t *msg, struct ppp_t *ppp)
 {
-	if (ppp && !conf_copy) {
+	if (!log_file || (ppp && !conf_copy)) {
 		log_free_msg(msg);
 		return;
 	}

@@ -118,13 +118,13 @@ If this option is
 .B deny
 then accel-ppp will deny second session authorization.
 .TP
-.BI "mppe=" require|prefere|deny
+.BI "mppe=" require|prefer|deny
 Specifies mppe negotioation preference.
 .br
 .B require
 - ask client for mppe, if it rejects drop connection
 .br
-.B prefere
+.B prefer
 - ask client for mppe, if it rejects don't fail.
 .br
 .B deny
@@ -133,7 +133,7 @@ Specifies mppe negotioation preference.
 Default behavior - don't ask client for mppe, but allow it if client wants.
 Please note that RADIUS may override this option by MS-MPPE-Encryption-Policy attribute.
 .TP
-.BI "ipv4=" deny|allow|prefere|require
+.BI "ipv4=" deny|allow|prefer|require
 Specify IPv4 (IPCP) negotioation algorithm:
 .br
 .B deny
@@ -142,13 +142,13 @@ Specify IPv4 (IPCP) negotioation algorithm:
 .B allow
 - negotiate IPv4 only if client requests.
 .br
-.B prefere
+.B prefer
 - ask client for IPv4 negotiation, don't fail if he rejects.
 .br
 .B require
 - require IPv4 negotiation.
 .TP
-.BI "ipv6=" deny|allow|prefere|require
+.BI "ipv6=" deny|allow|prefer|require
 Parameters are same as above.
 .TP
 .BI "ipv6-intf-id=" x:x:x:x|random
@@ -166,16 +166,12 @@ Specify peer interface identifier for IPv6.
 .BI "ipv6-accept-peer-intf-id=" 0|1
 Specify whether to accept peer's interface identifier.
 .TP
-.SH [lcp]
-.br
-PPP LCP module configuration
-.TP
-.BI "echo-interval=" n
+.BI "lcp-echo-interval=" n
 If this option is given and greater then 0 then lcp module will send echo-request every 
 .B n
 seconds.
 .TP
-.BI "echo-failure=" n
+.BI "lcp-echo-failure=" n
 Specifies maximum number of echo-requests may be sent without valid echo-reply, if exceeds connection will be terminated.
 .TP
 .SH [dns]
@@ -515,3 +511,53 @@ fc00:0:1:ffff::/64
 .BI "delegate=" ipv6prefix/mask,prefix_len
 Specifies range of prefixes to delegate to clients through DHCPv6 prefix delegation (rfc3633).
 Format is same as described above.
+.TP
+.SH [connlimit]
+.br
+This module limits connection rate from single source.
+.TP
+.BI "limit=" count/time
+Specifies acceptable rate of connections, for example limit=1/s or limit=10/m.
+.TP
+.BI "burst=" count
+.TP
+.BI "timeout=" n
+Specifies timeout in seconds after which module doesn't check rate until burst number of connections will be arrived.
+.TP
+.SH [shaper]
+.br
+This module controls shaper.
+.TP
+.BI "attr=" name
+Specifies which radius attribute contains rate information. Default - Filter-ID.
+.TP
+.BI "attr-up=" name
+.TP
+.BI "attr-down=" name
+Specifies which radius attributes contains rate information for upstream and downstream respectively.
+.TP
+.BI "burst-factor=" n
+Burst will be calculated as rate multyply burst-factor.
+.TP
+.BI "up-burst-factor=" n
+.TP
+.BI "down-burst-factor=" n
+Specifies burst factor for upstream and downstream respectively.
+.TP
+.BI "latency=" n
+Specifies latency (in miliseconds) parameter of tbf qdisc.
+.TP
+.BI "mpu=" n
+Specifies mpu parameter of tbf qdisc and policer.
+.TP
+.BI "r2q=" n
+Specifies r2q parameter of root htb qdisc.
+.TP
+.BI "quantum=" n
+Specifies quantum parameter of htb classes.
+.TP
+.BI "up-limiter=" police|htb
+Specifes upstream rate limiting method.
+.TP
+.BI "down-limiter=" tbf|htb
+Specifies downstream rate limiting method.

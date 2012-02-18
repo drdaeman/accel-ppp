@@ -23,6 +23,8 @@
 #include "utils.h"
 #include "cli.h"
 
+#include "connlimit.h"
+
 #include "memdebug.h"
 
 #define STATE_IDLE 0
@@ -629,6 +631,11 @@ static int pptp_connect(struct triton_md_handler_t *h)
 			continue;
 		}
 
+		if (triton_module_loaded("connlimit") && connlimit_check(cl_key_from_ipv4(addr.sin_addr.s_addr))) {
+			close(sock);
+			return 0;
+		}
+
 		log_info2("pptp: new connection from %s\n", inet_ntoa(addr.sin_addr));
 
 		if (iprange_client_check(addr.sin_addr.s_addr)) {
@@ -738,7 +745,9 @@ static void pptp_init(void)
 {
 	struct sockaddr_in addr;
 	char *opt;
-	
+
+	system("modprobe pptp");
+
 	serv.hnd.fd = socket(PF_INET, SOCK_STREAM, 0);
   if (serv.hnd.fd < 0) {
     log_emerg("pptp: failed to create server socket: %s\n", strerror(errno));
