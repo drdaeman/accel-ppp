@@ -750,6 +750,7 @@ static void init(void)
 	load_history_file();
 
 	start_server(host, port);
+	free(host);
 	
 	atexit(save_history_file);
 	
