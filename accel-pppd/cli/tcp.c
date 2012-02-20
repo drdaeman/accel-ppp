@@ -364,6 +364,7 @@ static void init(void)
 	temp_buf = malloc(RECV_BUF_SIZE);
 
 	start_server(host, port);
+	free(host);
 	
 	return;
 err_fmt:
