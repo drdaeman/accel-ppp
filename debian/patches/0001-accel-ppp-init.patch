@@ -1,0 +1,53 @@
+--- accel-ppp/contrib/debian/accel-ppp-init	2012-02-17 18:13:50.477566964 +0400
++++ accel-ppp/contrib/debian/accel-ppp-init	2012-02-17 18:23:14.173560060 +0400
+@@ -11,6 +11,12 @@
+ set -e
+ 
+ PATH=/bin:/usr/bin:/sbin:/usr/sbin
++DAEMON=/usr/sbin/accel-pppd
++CONFFILE=/etc/accel-ppp.conf
++PIDFILE=/var/run/accel-pppd.pid
++
++# See if binary is there
++test -x $DAEMON || exit 0
+ 
+ . /lib/lsb/init-functions
+ 
+@@ -19,13 +25,15 @@
+ fi
+ 
+ if [ -z $ACCEL_PPPD_OPTS ]; then
+-  ACCEL_PPPD_OPTS="-c /etc/accel-ppp.conf"
++  # Exit if no custom options are set and configuration file does not exists
++  test -f $CONFFILE || exit 0
++  ACCEL_PPPD_OPTS="-c $CONFFILE"
+ fi
+ 
+ case "$1" in
+   start)
+ 	log_daemon_msg "Starting PPtP/L2TP/PPPoE server" "accel-pppd"
+-	if start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/accel-pppd -- -d -p /var/run/accel-pppd.pid $ACCEL_PPPD_OPTS; then
++	if start-stop-daemon --start --quiet --oknodo --exec $DAEMON -- -d -p $PIDFILE $ACCEL_PPPD_OPTS; then
+ 	    log_end_msg 0
+ 	else
+ 	    log_end_msg 1
+@@ -33,8 +41,8 @@
+   ;;
+   restart)
+ 	log_daemon_msg "Restarting PPtP/L2TP/PPPoE server" "accel-pppd"
+-	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile /var/run/accel-pppd.pid
+-	if start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/accel-pppd -- -d -p /var/run/accel-pppd.pid $ACCEL_PPPD_OPTS; then
++	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile $PIDFILE
++	if start-stop-daemon --start --quiet --oknodo --exec $DAEMON -- -d -p $PIDFILE $ACCEL_PPPD_OPTS; then
+ 	    log_end_msg 0
+ 	else
+ 	    log_end_msg 1
+@@ -43,7 +51,7 @@
+ 
+   stop)
+ 	log_daemon_msg "Stopping PPtP/L2TP/PPPoE server" "accel-pppd"
+-	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile /var/run/accel-pppd.pid
++	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile $PIDFILE
+ 	log_end_msg 0
+   ;;
+ 

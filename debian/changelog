@@ -1,3 +1,10 @@
+accel-ppp (1.5.0.99~0alphacom1-0ubuntu1~0custom1) oneiric; urgency=low
+
+  * Upstream Git changes up to b883bcf3 (bugfixes, new shaping module and more)
+  * Alphacom PPPoE Service-Name patches.
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Fri, 25 Feb 2012 06:54:00 +0400
+
 accel-ppp (1.5.0-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Initial Debian packaging.
