@@ -734,6 +734,7 @@ static int check_padi_limit(struct pppoe_serv_t *serv, uint8_t *addr)
 		if ((ts.tv_sec - padi->ts.tv_sec) * 1000 + (ts.tv_nsec - padi->ts.tv_nsec) / 1000000 > 1000) {
 			list_del(&padi->entry);
 			mempool_free(padi);
+			serv->padi_cnt--;
 			__sync_sub_and_fetch(&total_padi_cnt, 1);
 		} else
 			break;
@@ -779,6 +780,7 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	int n, i, service_match = 0;
 	struct delayed_pado_t *pado;
 	char **service_names = NULL;
+	struct timespec ts;
 
 	__sync_add_and_fetch(&stat_PADI_recv, 1);
 
@@ -787,6 +789,13 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 
 	if (check_padi_limit(serv, ethhdr->h_source)) {
 		__sync_add_and_fetch(&stat_PADI_drop, 1);
+		if (conf_verbose) {
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			if (ts.tv_sec - 60 >= serv->last_padi_limit_warn) {
+				log_warn("pppoe: discarding overlimit PADI packets on interface %s\n", serv->ifname);
+				serv->last_padi_limit_warn = ts.tv_sec;
+			}
+		}
 		return;
 	}
 
