@@ -1,0 +1,23 @@
+#!/bin/bash
+
+PROJECT_BINARY_DIR="@PROJECT_BINARY_DIR@"
+PROJECT_SOURCE_DIR="@PROJECT_SOURCE_DIR@"
+
+# shell script invoked with the following arguments
+# $(CXX) $(CXX_DEFINES) $(CXX_FLAGS) -o OBJECT_FILE -c SOURCE_FILE
+
+# extract parameters
+SOURCE_FILE="${@: -1:1}"
+OBJECT_FILE="${@: -3:1}"
+COMPILER_AND_FLAGS=${@:1:$#-4}
+
+# make source file path relative to project source dir
+SOURCE_FILE_RELATIVE="${SOURCE_FILE:${#PROJECT_SOURCE_DIR} + 1}"
+
+# make object file path absolute
+OBJECT_FILE_ABSOLUTE="$(pwd)/$OBJECT_FILE"
+
+cd "$PROJECT_SOURCE_DIR"
+
+# invoke compiler
+exec $COMPILER_AND_FLAGS -c "${SOURCE_FILE_RELATIVE}" -o "${OBJECT_FILE_ABSOLUTE}"
