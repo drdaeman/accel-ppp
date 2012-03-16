@@ -26,13 +26,13 @@ static void change_limits(void)
 
 	f = fopen("/proc/sys/fs/nr_open", "r");
 	if (f) {
-		fscanf(f, "%d", &nr_open);
+		fscanf(f, "%u", &nr_open);
 		fclose(f);
 	}
 
 	f = fopen("/proc/sys/fs/file-max", "r");
 	if (f) {
-		fscanf(f, "%d", &file_max);
+		fscanf(f, "%u", &file_max);
 		fclose(f);
 	}
 
