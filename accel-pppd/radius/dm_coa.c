@@ -124,21 +124,37 @@ static int dm_coa_send_nak(int fd, struct rad_packet_t *req, struct sockaddr_in 
 	return 0;
 }
 
+int dm_coa_free(struct radius_pd_t *rpd)
+{
+	int c;
+
+	c = __sync_sub_and_fetch(&rpd->dm_coa_req->counter, 1);
+	if (!c) {
+		if (rpd->dm_coa_req->res)
+			dm_coa_send_nak(serv.hnd.fd, rpd->dm_coa_req->pack, &rpd->dm_coa_req->addr, 0);
+		else
+			dm_coa_send_ack(serv.hnd.fd, rpd->dm_coa_req->pack, &rpd->dm_coa_req->addr);
+
+		rad_packet_free(rpd->dm_coa_req->pack);
+		_free(rpd->dm_coa_req);
+
+		pthread_mutex_lock(&rpd->lock);
+		rpd->dm_coa_req = NULL;
+		pthread_mutex_unlock(&rpd->lock);
+	}
+	return c;
+}
 
 static void disconnect_request(struct radius_pd_t *rpd)
 {
 	if (conf_verbose) {
 		log_ppp_info2("recv ");
-		rad_packet_print(rpd->dm_coa_req, NULL, log_ppp_info2);
+		rad_packet_print(rpd->dm_coa_req->pack, NULL, log_ppp_info2);
 	}
 
-	dm_coa_send_ack(serv.hnd.fd, rpd->dm_coa_req, &rpd->dm_coa_addr);
+	dm_coa_send_ack(serv.hnd.fd, rpd->dm_coa_req->pack, &rpd->dm_coa_req->addr);
 
-	rad_packet_free(rpd->dm_coa_req);
-	
-	pthread_mutex_lock(&rpd->lock);
-	rpd->dm_coa_req = NULL;
-	pthread_mutex_unlock(&rpd->lock);
+	dm_coa_free(rpd);
 
 	ppp_terminate(rpd->ppp, TERM_ADMIN_RESET, 0);
 }
@@ -147,99 +163,115 @@ static void coa_request(struct radius_pd_t *rpd)
 {
 	struct ev_radius_t ev = {
 		.ppp = rpd->ppp,
-		.request = rpd->dm_coa_req,
+		.request = rpd->dm_coa_req->pack,
 	};
 
 	if (conf_verbose) {
 		log_ppp_info2("recv ");
-		rad_packet_print(rpd->dm_coa_req, NULL, log_ppp_info2);
+		rad_packet_print(rpd->dm_coa_req->pack, NULL, log_ppp_info2);
 	}
 
 	triton_event_fire(EV_RADIUS_COA, &ev);
 
 	if (ev.res)
-		dm_coa_send_nak(serv.hnd.fd, rpd->dm_coa_req, &rpd->dm_coa_addr, 0);
-	else
-		dm_coa_send_ack(serv.hnd.fd, rpd->dm_coa_req, &rpd->dm_coa_addr);
+		__sync_add_and_fetch(&rpd->dm_coa_req->res, 1);
 	
-	rad_packet_free(rpd->dm_coa_req);
-
-	pthread_mutex_lock(&rpd->lock);
-	rpd->dm_coa_req = NULL;
-	pthread_mutex_unlock(&rpd->lock);
+	dm_coa_free(rpd);
 }
 
 void dm_coa_cancel(struct radius_pd_t *rpd)
 {
 	triton_cancel_call(rpd->ppp->ctrl->ctx, (triton_event_func)disconnect_request);
 	triton_cancel_call(rpd->ppp->ctrl->ctx, (triton_event_func)coa_request);
-	rad_packet_free(rpd->dm_coa_req);
+	dm_coa_free(rpd);
+}
+
+static int dm_coa_read_session_match(struct radius_pd_t *rpd, void *data)
+{
+	struct rad_dm_coa_req_t *req = (struct rad_dm_coa_req_t *)data;
+
+	if (rpd->dm_coa_req) {
+		pthread_mutex_unlock(&rpd->lock);
+		return -1;
+	}
+
+	__sync_add_and_fetch(&req->counter, 1);
+	rpd->dm_coa_req = req;
+
+	if (req->pack->code == CODE_DISCONNECT_REQUEST)
+		triton_context_call(rpd->ppp->ctrl->ctx, (triton_event_func)disconnect_request, rpd);
+	else
+		triton_context_call(rpd->ppp->ctrl->ctx, (triton_event_func)coa_request, rpd);
+
+	pthread_mutex_unlock(&rpd->lock);
+	return 0;
 }
 
 static int dm_coa_read(struct triton_md_handler_t *h)
 {
-	struct rad_packet_t *pack;
-	struct radius_pd_t *rpd;
-	int err_code;
-	struct sockaddr_in addr;
+	struct rad_dm_coa_req_t *req;
+	int err_code, res;
 
 	while (1) {
-		if (rad_packet_recv(h->fd, &pack, &addr))
+		req = (struct rad_dm_coa_req_t *)_malloc(sizeof(*req));
+		req->counter = 0;
+
+		if (rad_packet_recv(h->fd, &req->pack, &req->addr)) {
+			_free(req);
 			return 0;
+		}
 
-		if (!pack)
+		if (!req->pack) {
+			_free(req);
 			continue;
+		}
 
-		if (pack->code != CODE_DISCONNECT_REQUEST	&& pack->code != CODE_COA_REQUEST) {
-			log_warn("radius:dm_coa: unexpected code (%i) received\n", pack->code);
+		if (req->pack->code != CODE_DISCONNECT_REQUEST && req->pack->code != CODE_COA_REQUEST) {
+			log_warn("radius:dm_coa: unexpected code (%i) received\n", req->pack->code);
 			goto out_err_no_reply;
 		}
 
-		if (dm_coa_check_RA(pack, conf_dm_coa_secret)) {
+		if (dm_coa_check_RA(req->pack, conf_dm_coa_secret)) {
 			log_warn("radius:dm_coa: RA validation failed\n");
 			goto out_err_no_reply;
 		}
 
 		if (conf_verbose) {
 			log_debug("recv ");
-			rad_packet_print(pack, NULL, log_debug);
+			rad_packet_print(req->pack, NULL, log_debug);
 		}
 
-		if (rad_check_nas_pack(pack)) {
+		if (rad_check_nas_pack(req->pack)) {
 			log_warn("radius:dm_coa: NAS identification failed\n");
 			err_code = 403;
 			goto out_err;
 		}
-		
-		rpd = rad_find_session_pack(pack);
-		if (!rpd) {
-			log_warn("radius:dm_coa: session not found\n");
-			err_code = 503;
+
+		res = rad_find_sessions_pack(req->pack, &dm_coa_read_session_match, (void *)req);
+		if (res <= 0) {
+			if (res == 0) {
+				log_warn("radius:dm_coa: no session(s) found\n");
+				err_code = 503;
+			} else if (res == -2) {
+				log_warn("radius:dm_coa: unknown session identification attribute(s) found\n");
+				err_code = 401;
+			} else {
+				log_warn("radius:dm_coa: no valid matching attributes found\n");
+				err_code = 402;
+			}
 			goto out_err;
+		} else if (conf_verbose) {
+			log_ppp_info2("radius:dm_coa: %d session(s) matched request\n", res);
 		}
-		
-		if (rpd->dm_coa_req) {
-			pthread_mutex_unlock(&rpd->lock);
-			goto out_err_no_reply;
-		}
-
-		rpd->dm_coa_req = pack;
-		memcpy(&rpd->dm_coa_addr, &addr, sizeof(addr));
-
-		if (pack->code == CODE_DISCONNECT_REQUEST)
-			triton_context_call(rpd->ppp->ctrl->ctx, (triton_event_func)disconnect_request, rpd);
-		else
-			triton_context_call(rpd->ppp->ctrl->ctx, (triton_event_func)coa_request, rpd);
-
-		pthread_mutex_unlock(&rpd->lock);
 
 		continue;
 
 	out_err:
-		dm_coa_send_nak(h->fd, pack, &addr, err_code);
+		dm_coa_send_nak(h->fd, req->pack, &req->addr, err_code);
 
 	out_err_no_reply:
-		rad_packet_free(pack);
+		rad_packet_free(req->pack);
+		_free(req);
 	}
 }
 

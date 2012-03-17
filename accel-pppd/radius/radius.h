@@ -102,6 +102,14 @@ struct rad_plugin_t
 	int (*send_accounting_request)(struct rad_plugin_t *, struct rad_packet_t *pack);
 };
 
+struct rad_dm_coa_req_t
+{
+	struct rad_packet_t *pack;
+	struct sockaddr_in addr;
+	int counter;
+	int res;
+};
+
 struct ppp_t;
 
 void rad_register_plugin(struct ppp_t *, struct rad_plugin_t *);
