@@ -103,6 +103,7 @@ struct ppp_t
 	time_t start_time;
 	time_t stop_time;
 	char *username;
+	char *chargeable_identity;
 	struct ipv4db_item_t *ipv4;
 	struct ipv6db_item_t *ipv6;
 	char *ipv4_pool_name;

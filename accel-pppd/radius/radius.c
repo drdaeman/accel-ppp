@@ -40,6 +40,7 @@ char *conf_dm_coa_secret;
 int conf_sid_in_auth;
 int conf_require_nas_ident;
 int conf_acct_interim_interval;
+int conf_request_cui;
 
 int conf_accounting;
 int conf_fail_time;
@@ -134,6 +135,11 @@ int rad_proc_attrs(struct rad_req_t *req)
 				break;
 			case Framed_IPv6_Pool:
 				req->rpd->ppp->ipv6_pool_name = _strdup(attr->val.string);
+				break;
+			case Chargeable_User_Identity:
+				if (req->rpd->ppp->chargeable_identity)
+				    _free(req->rpd->ppp->chargeable_identity);
+				req->rpd->ppp->chargeable_identity = _strdup(attr->val.string);
 				break;
 		}
 	}
@@ -338,7 +344,7 @@ struct radius_pd_t *find_pd(struct ppp_t *ppp)
 	abort();
 }
 
-int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid)
+int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid, const char *cui)
 {
 	if (!ppp->username)
 		return 0;
@@ -352,6 +358,8 @@ int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char
 		return 0;
 	if (csid && ppp->ctrl->calling_station_id && strcmp(csid, ppp->ctrl->calling_station_id))
 		return 0;
+	if (cui && (!ppp->chargeable_identity || strcmp(cui, ppp->chargeable_identity)))
+		return 0;
 	return -1;
 }
 
@@ -362,6 +370,7 @@ int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct rad
 	const char *sessionid = NULL;
 	const char *username = NULL;
 	const char *csid = NULL;
+	const char *cui = NULL;
 	int port_id = -1;
 	in_addr_t ipaddr = 0;
 	unsigned int count = 0;
@@ -383,10 +392,12 @@ int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct rad
 			case Calling_Station_Id:
 				csid = attr->val.string;
 				break;
+			case Chargeable_User_Identity:
+				cui = attr->val.string;
+				break;
 			case Called_Station_Id:
 			case NAS_Port_Id:
 			case Acct_Multi_Session_Id:
-			case Chargeable_User_Identity:
 			case Framed_Interface_Id:
 			case Framed_IPv6_Prefix:
 				// Unsupported attributes
@@ -399,7 +410,7 @@ int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct rad
 	
 	pthread_rwlock_rdlock(&sessions_lock);
 	list_for_each_entry(rpd, &sessions, entry) {
-		if (!rad_match_session(rpd->ppp, sessionid, username, port_id, ipaddr, csid))
+		if (!rad_match_session(rpd->ppp, sessionid, username, port_id, ipaddr, csid, cui))
 			continue;
 	    pthread_mutex_lock(&rpd->lock);
 		if (!callback(rpd, cb_data))
@@ -543,7 +554,11 @@ static int load_config(void)
 	opt = conf_get_opt("radius", "sid_in_auth");
 	if (opt)
 		conf_sid_in_auth = atoi(opt);
-	
+
+	opt = conf_get_opt("radius", "request-cui");
+		if (opt)
+			conf_request_cui = atoi(opt);
+
 	opt = conf_get_opt("radius", "require-nas-identification");
 	if (opt)
 		conf_require_nas_ident = atoi(opt);

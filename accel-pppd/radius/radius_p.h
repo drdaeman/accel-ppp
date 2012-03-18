@@ -132,9 +132,10 @@ extern int conf_acct_interim_interval;
 extern int conf_accounting;
 extern int conf_fail_time;
 extern int conf_req_limit;
+extern int conf_request_cui;
 
 int rad_check_nas_pack(struct rad_packet_t *pack);
-int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid);
+int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid, const char *cui);
 int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct radius_pd_t *, void *), void *cb_data);
 
 int rad_dict_load(const char *fname);
