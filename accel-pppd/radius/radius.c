@@ -405,7 +405,7 @@ int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct rad
 		}
 	}
 
-	if (!sessionid && !username && port_id == -1 && ipaddr == 0 && !csid)
+	if (!sessionid && !username && port_id == -1 && ipaddr == 0 && !csid && !cui)
 		return -1;
 	
 	pthread_rwlock_rdlock(&sessions_lock);
