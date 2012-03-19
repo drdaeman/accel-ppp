@@ -152,8 +152,6 @@ static void disconnect_request(struct radius_pd_t *rpd)
 		rad_packet_print(rpd->dm_coa_req->pack, NULL, log_ppp_info2);
 	}
 
-	dm_coa_send_ack(serv.hnd.fd, rpd->dm_coa_req->pack, &rpd->dm_coa_req->addr);
-
 	dm_coa_free(rpd);
 
 	ppp_terminate(rpd->ppp, TERM_ADMIN_RESET, 0);
@@ -215,6 +213,7 @@ static int dm_coa_read(struct triton_md_handler_t *h)
 	while (1) {
 		req = (struct rad_dm_coa_req_t *)_malloc(sizeof(*req));
 		req->counter = 0;
+		req->res = 0;
 
 		if (rad_packet_recv(h->fd, &req->pack, &req->addr)) {
 			_free(req);
