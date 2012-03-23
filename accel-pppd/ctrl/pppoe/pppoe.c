@@ -1224,7 +1224,7 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 {
 	enum parse_ifopt_state state = PIS_Property;
 	char *str = _strdup(ifopt);
-	char *cur, *start, *property;
+	char *cur, *start, *property = NULL;
 	char error[1280];
 	char c;
 	int running = -1;
@@ -1236,6 +1236,10 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 		switch (state) {
 			case PIS_Property:
 				if (!c) {
+					if (!property && cur != start)
+						property = start;
+					if (property && strlen(property) > 0)
+						parse_interface_set_option(serv, property, "1", error);
 					running = 0;
 				} else if (c == '=') {
 					property = start;
@@ -1244,7 +1248,8 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 				} else if (c == ',') {
 					property = start;
 					*cur = 0;
-					running = parse_interface_set_option(serv, property, "1", error);
+					if (property && strlen(property) > 0)
+						running = parse_interface_set_option(serv, property, "1", error);
 					start = cur + 1;
 				} else if (!(isalpha(c) || isdigit(c) || c == '-')) {
 					sprintf(error, "Invalid character 0x%02x in property name at offset %ld", c, cur - str);
