@@ -216,6 +216,25 @@ out:
 	return PWDB_DENIED;
 }
 
+int rad_auth_set_common(struct rad_packet_t *pack, struct radius_pd_t *rpd)
+{
+	if (conf_sid_in_auth)
+		if (rad_packet_add_str(pack, NULL, "Acct-Session-Id", rpd->ppp->sessionid))
+			return -1;
+
+	if (conf_request_cui) {
+		if (rpd->ppp->chargeable_identity && strlen(rpd->ppp->chargeable_identity) > 0) {
+			if (rad_packet_add_str(pack, NULL, "Chargeable-User-Identity", rpd->ppp->chargeable_identity))
+				return -1;
+		} else {
+			if (rad_packet_add_octets(pack, NULL, "Chargeable-User-Identity", (const uint8_t *)"\0", 1))
+				return -1;
+		}
+	}
+
+	return 0;
+}
+
 int rad_auth_pap(struct radius_pd_t *rpd, const char *username, va_list args)
 {
 	struct rad_req_t *req;
@@ -242,9 +261,8 @@ int rad_auth_pap(struct radius_pd_t *rpd, const char *username, va_list args)
 	if (epasswd_len)
 		_free(epasswd);
 
-	if (conf_sid_in_auth)
-		if (rad_packet_add_str(req->pack, NULL, "Acct-Session-Id", rpd->ppp->sessionid))
-			return -1;
+	if (rad_auth_set_common(req->pack, rpd))
+		goto out;
 
 	r = rad_auth_send(req);
 	if (r == PWDB_SUCCESS) {
@@ -309,10 +327,9 @@ int rad_auth_chap_md5(struct radius_pd_t *rpd, const char *username, va_list arg
 		if (rad_packet_build(rpd->auth_req->pack, rpd->auth_req->RA))
 			return -1;
 	}
-	
-	if (conf_sid_in_auth)
-		if (rad_packet_add_str(rpd->auth_req->pack, NULL, "Acct-Session-Id", rpd->ppp->sessionid))
-			goto out;
+
+	if (rad_auth_set_common(rpd->auth_req->pack, rpd))
+		goto out;
 
 	r = rad_auth_send(rpd->auth_req);
 	if (r == PWDB_SUCCESS) {
@@ -425,10 +442,8 @@ int rad_auth_mschap_v1(struct radius_pd_t *rpd, const char *username, va_list ar
 			return -1;
 	}
 
-	if (conf_sid_in_auth)
-		if (rad_packet_add_str(rpd->auth_req->pack, NULL, "Acct-Session-Id", rpd->ppp->sessionid))
+	if (rad_auth_set_common(rpd->auth_req->pack, rpd))
 			goto out;
-
 
 	r = rad_auth_send(rpd->auth_req);
 	if (r == PWDB_SUCCESS) {
@@ -504,11 +519,10 @@ int rad_auth_mschap_v2(struct radius_pd_t *rpd, const char *username, va_list ar
 		}
 		
 		if (rad_packet_build(rpd->auth_req->pack, rpd->auth_req->RA))
-			return -1;
+			goto out;
 	}
-	
-	if (conf_sid_in_auth)
-		if (rad_packet_add_str(rpd->auth_req->pack, NULL, "Acct-Session-Id", rpd->ppp->sessionid))
+
+	if (rad_auth_set_common(rpd->auth_req->pack, rpd))
 			goto out;
 
 	r = rad_auth_send(rpd->auth_req);

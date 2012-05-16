@@ -80,6 +80,9 @@ struct rad_req_t *rad_req_alloc(struct radius_pd_t *rpd, int code, const char *u
 	if (rpd->attr_class)
 		if (rad_packet_add_octets(req->pack, NULL, "Class", rpd->attr_class, rpd->attr_class_len))
 			goto out_err;
+	if (rpd->ppp->chargeable_identity && strlen(rpd->ppp->chargeable_identity) > 0)
+		if (rad_packet_add_str(req->pack, NULL, "Chargeable-User-Identity", rpd->ppp->chargeable_identity))
+			goto out_err;
 
 	list_for_each_entry(plugin, &req->rpd->plugin_list, entry) {
 		switch (code) {

@@ -50,17 +50,17 @@ int __conf_load(const char *fname, struct conf_sect_t *cur_sect)
 		str = skip_space(buf);
 		if (*str == '#' || *str == 0)
 			continue;
-		if (strncmp(str, "$include", 8) == 0)	{
+		if (strncmp(str, "$include", 8) == 0) {
 			str = skip_word(str);
 			str = skip_space(str);
-			if (__conf_load(str, cur_sect));
+			if (__conf_load(str, cur_sect))
 				break;
 			continue;
 		}
 		if (*str == '[') {
 			for (str2 = ++str; *str2 && *str2 != ']'; str2++);
 			if (*str2 != ']') {
-				fprintf(stderr, "conf_file:%s:%i: sintax error\n", fname, cur_line);
+				fprintf(stderr, "conf_file:%s:%i: syntax error\n", fname, cur_line);
 				return -1;
 			}
 			*str2 = 0;
