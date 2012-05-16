@@ -40,6 +40,7 @@ char *conf_dm_coa_secret;
 int conf_sid_in_auth;
 int conf_require_nas_ident;
 int conf_acct_interim_interval;
+int conf_request_cui;
 
 int conf_accounting;
 int conf_fail_time;
@@ -57,13 +58,28 @@ int rad_proc_attrs(struct rad_req_t *req)
 {
 	struct rad_attr_t *attr;
 	struct ipv6db_addr_t *a;
+	struct ev_dns_t dns;
 	int res = 0;
 
+	dns.ppp = NULL;
 	req->rpd->acct_interim_interval = conf_acct_interim_interval;
 
 	list_for_each_entry(attr, &req->reply->attrs, entry) {
-		if (attr->vendor)
+		if (attr->vendor && attr->vendor->id == Vendor_Microsoft) {
+			switch (attr->attr->id) {
+				case MS_Primary_DNS_Server:
+					dns.ppp = req->rpd->ppp;
+					dns.dns1 = attr->val.ipaddr;
+					break;
+				case MS_Secondary_DNS_Server:
+					dns.ppp = req->rpd->ppp;
+					dns.dns2 = attr->val.ipaddr;
+					break;
+			}
 			continue;
+		} else if (attr->vendor)
+			continue;
+
 		switch(attr->attr->id) {
 			case Framed_IP_Address:
 				if (!conf_gw_ip_address)
@@ -120,8 +136,16 @@ int rad_proc_attrs(struct rad_req_t *req)
 			case Framed_IPv6_Pool:
 				req->rpd->ppp->ipv6_pool_name = _strdup(attr->val.string);
 				break;
+			case Chargeable_User_Identity:
+				if (req->rpd->ppp->chargeable_identity)
+				    _free(req->rpd->ppp->chargeable_identity);
+				req->rpd->ppp->chargeable_identity = _strdup(attr->val.string);
+				break;
 		}
 	}
+
+	if (dns.ppp)
+		triton_event_fire(EV_DNS, &dns);
 
 	return res;
 }
@@ -320,41 +344,36 @@ struct radius_pd_t *find_pd(struct ppp_t *ppp)
 	abort();
 }
 
-
-struct radius_pd_t *rad_find_session(const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid)
+int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid, const char *cui)
 {
-	struct radius_pd_t *rpd;
-	
-	pthread_rwlock_rdlock(&sessions_lock);
-	list_for_each_entry(rpd, &sessions, entry) {
-		if (!rpd->ppp->username)
-			continue;
-		if (sessionid && strcmp(sessionid, rpd->ppp->sessionid))
-			continue;
-		if (username && strcmp(username, rpd->ppp->username))
-			continue;
-		if (port_id >= 0 && port_id != rpd->ppp->unit_idx)
-			continue;
-		if (ipaddr && rpd->ppp->ipv4 && ipaddr != rpd->ppp->ipv4->peer_addr)
-			continue;
-		if (csid && rpd->ppp->ctrl->calling_station_id && strcmp(csid, rpd->ppp->ctrl->calling_station_id))
-			continue;
-		pthread_mutex_lock(&rpd->lock);
-		pthread_rwlock_unlock(&sessions_lock);
-		return rpd;
-	}
-	pthread_rwlock_unlock(&sessions_lock);
-	return NULL;
+	if (!ppp->username)
+		return 0;
+	if (sessionid && strcmp(sessionid, ppp->sessionid))
+		return 0;
+	if (username && strcmp(username, ppp->username))
+		return 0;
+	if (port_id >= 0 && port_id != ppp->unit_idx)
+		return 0;
+	if (ipaddr && ppp->ipv4 && ipaddr != ppp->ipv4->peer_addr)
+		return 0;
+	if (csid && ppp->ctrl->calling_station_id && strcmp(csid, ppp->ctrl->calling_station_id))
+		return 0;
+	if (cui && (!ppp->chargeable_identity || strcmp(cui, ppp->chargeable_identity)))
+		return 0;
+	return -1;
 }
 
-struct radius_pd_t *rad_find_session_pack(struct rad_packet_t *pack)
+int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct radius_pd_t *, void *), void *cb_data)
 {
 	struct rad_attr_t *attr;
+	struct radius_pd_t *rpd;
 	const char *sessionid = NULL;
 	const char *username = NULL;
 	const char *csid = NULL;
+	const char *cui = NULL;
 	int port_id = -1;
 	in_addr_t ipaddr = 0;
+	unsigned int count = 0;
 	
 	list_for_each_entry(attr, &pack->attrs, entry) {
 		switch(attr->attr->id) {
@@ -373,16 +392,32 @@ struct radius_pd_t *rad_find_session_pack(struct rad_packet_t *pack)
 			case Calling_Station_Id:
 				csid = attr->val.string;
 				break;
+			case Chargeable_User_Identity:
+				cui = attr->val.string;
+				break;
+			case Called_Station_Id:
+			case NAS_Port_Id:
+			case Acct_Multi_Session_Id:
+			case Framed_Interface_Id:
+			case Framed_IPv6_Prefix:
+				// Unsupported attributes
+				return -2;
 		}
 	}
 
-	if (!sessionid && !username && port_id == -1 && ipaddr == 0 && !csid)
-		return NULL;
-
-	if (username && !sessionid && port_id == -1 && ipaddr == 0)
-		return NULL;
+	if (!sessionid && !username && port_id == -1 && ipaddr == 0 && !csid && !cui)
+		return -1;
 	
-	return rad_find_session(sessionid, username, port_id, ipaddr, csid);
+	pthread_rwlock_rdlock(&sessions_lock);
+	list_for_each_entry(rpd, &sessions, entry) {
+		if (!rad_match_session(rpd->ppp, sessionid, username, port_id, ipaddr, csid, cui))
+			continue;
+	    pthread_mutex_lock(&rpd->lock);
+		if (!callback(rpd, cb_data))
+			count++;
+	}
+	pthread_rwlock_unlock(&sessions_lock);
+	return count;
 }
 
 int rad_check_nas_pack(struct rad_packet_t *pack)
@@ -519,7 +554,11 @@ static int load_config(void)
 	opt = conf_get_opt("radius", "sid_in_auth");
 	if (opt)
 		conf_sid_in_auth = atoi(opt);
-	
+
+	opt = conf_get_opt("radius", "request-cui");
+		if (opt)
+			conf_request_cui = atoi(opt);
+
 	opt = conf_get_opt("radius", "require-nas-identification");
 	if (opt)
 		conf_require_nas_ident = atoi(opt);

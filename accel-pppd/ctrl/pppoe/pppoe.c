@@ -80,6 +80,7 @@ int conf_ifname_in_sid;
 char *conf_pado_delay;
 int conf_tr101 = 1;
 int conf_padi_limit = 0;
+int conf_mppe = MPPE_UNSET;
 int conf_reply_exact_service = 0;
 char *conf_service_names[MAX_SERVICE_NAMES];
 
@@ -265,6 +266,7 @@ static struct pppoe_conn_t *allocate_channel(struct pppoe_serv_t *serv, const ui
 	conn->ctrl.max_mtu = MAX_PPPOE_MTU;
 	conn->ctrl.type = CTRL_TYPE_PPPOE;
 	conn->ctrl.name = "pppoe";
+	conn->ctrl.mppe = conf_mppe;
 
 	conn->ctrl.calling_station_id = _malloc(IFNAMSIZ + 19);
 	conn->ctrl.called_station_id = _malloc(IFNAMSIZ + 19);
@@ -1224,7 +1226,7 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 {
 	enum parse_ifopt_state state = PIS_Property;
 	char *str = _strdup(ifopt);
-	char *cur, *start, *property;
+	char *cur, *start, *property = NULL;
 	char error[1280];
 	char c;
 	int running = -1;
@@ -1236,6 +1238,10 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 		switch (state) {
 			case PIS_Property:
 				if (!c) {
+					if (!property && cur != start)
+						property = start;
+					if (property && strlen(property) > 0)
+						parse_interface_set_option(serv, property, "1", error);
 					running = 0;
 				} else if (c == '=') {
 					property = start;
@@ -1244,7 +1250,8 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 				} else if (c == ',') {
 					property = start;
 					*cur = 0;
-					running = parse_interface_set_option(serv, property, "1", error);
+					if (property && strlen(property) > 0)
+						running = parse_interface_set_option(serv, property, "1", error);
 					start = cur + 1;
 				} else if (!(isalpha(c) || isdigit(c) || c == '-')) {
 					sprintf(error, "Invalid character 0x%02x in property name at offset %ld", c, cur - str);
@@ -1602,6 +1609,19 @@ static void load_config(void)
 	opt = conf_get_opt("pppoe", "padi-limit");
 	if (opt)
 		conf_padi_limit = atoi(opt);
+
+	conf_mppe = MPPE_UNSET;
+	opt = conf_get_opt("l2tp", "mppe");
+	if (opt) {
+		if (strcmp(opt, "deny") == 0)
+			conf_mppe = MPPE_DENY;
+		else if (strcmp(opt, "allow") == 0)
+			conf_mppe = MPPE_ALLOW;
+		else if (strcmp(opt, "prefer") == 0)
+			conf_mppe = MPPE_PREFER;
+		else if (strcmp(opt, "require") == 0)
+			conf_mppe = MPPE_REQUIRE;
+	}
 }
 
 static void pppoe_init(void)

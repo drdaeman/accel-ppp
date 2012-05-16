@@ -30,8 +30,7 @@ struct radius_pd_t
 
 	struct triton_timer_t session_timeout;
 
-	struct rad_packet_t *dm_coa_req;
-	struct sockaddr_in dm_coa_addr;
+	struct rad_dm_coa_req_t *dm_coa_req;
 
 	struct ipv4db_item_t ipv4_addr;
 	struct ipv6db_item_t ipv6_addr;
@@ -133,10 +132,11 @@ extern int conf_acct_interim_interval;
 extern int conf_accounting;
 extern int conf_fail_time;
 extern int conf_req_limit;
+extern int conf_request_cui;
 
 int rad_check_nas_pack(struct rad_packet_t *pack);
-struct radius_pd_t *rad_find_session(const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid);
-struct radius_pd_t *rad_find_session_pack(struct rad_packet_t *pack);
+int rad_match_session(const struct ppp_t *ppp, const char *sessionid, const char *username, int port_id, in_addr_t ipaddr, const char *csid, const char *cui);
+int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct radius_pd_t *, void *), void *cb_data);
 
 int rad_dict_load(const char *fname);
 void rad_dict_free(struct rad_dict_t *dict);

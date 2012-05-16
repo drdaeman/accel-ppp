@@ -245,6 +245,11 @@ static void destablish_ppp(struct ppp_t *ppp)
 		ppp->username = NULL;
 	}
 
+	if (ppp->chargeable_identity) {
+		_free(ppp->chargeable_identity);
+		ppp->chargeable_identity = NULL;
+	}
+
 	if (ppp->ipv4_pool_name) {
 		_free(ppp->ipv4_pool_name);
 		ppp->ipv4_pool_name = NULL;
