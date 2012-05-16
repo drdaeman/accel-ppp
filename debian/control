@@ -11,3 +11,8 @@ Architecture: any
 Depends: libssl1.0.0, libpcre3 (>= 7.8), libnl2 (>= 1.99)
 Description: High performance PPTP/L2TP/PPPoE server for Linux.
 
+Package: accel-ppp-dbg
+Architecture: any
+Depends: accel-ppp (= ${binary:Version}), ${misc:Depends}
+Description: Debug symbols for accel-ppp.
+
