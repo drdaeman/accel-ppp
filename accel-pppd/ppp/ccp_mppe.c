@@ -76,7 +76,7 @@ static struct ccp_option_t *mppe_init(struct ppp_ccp_t *ccp)
 	else
 		mppe_opt->mppe = -1;
 	
-	if (mppe == MPPE_REQUIRE)
+	if (mppe == MPPE_REQUIRE || mppe == MPPE_PREFER)
 		ccp->ld.passive = 0;
 
 	mppe_opt->opt.id = CI_MPPE;
@@ -214,7 +214,9 @@ static int mppe_recv_conf_req(struct ppp_ccp_t *ccp, struct ccp_option_t *opt, u
 		}
 
 		log_ppp_debug(" (mppe enabled)");
-	}
+		ccp->ppp->comp = "mppe";
+	} else
+		ccp->ppp->comp = NULL;
 
 	return CCP_OPT_ACK;
 }
