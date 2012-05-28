@@ -1,3 +1,10 @@
+accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
+
+  * Upstream Git changes up to 0a823d8d. Most importantly, this fixes
+    a segfault on overlong usernames (SF ref #3529943).
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Mon, 28 May 2012 21:59:00 +0400
+
 accel-ppp (1.6.1.99~0alphacom1-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Upstream Git changes up to 88b01cc6.

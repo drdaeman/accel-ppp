@@ -1,11 +1,11 @@
---- accel-ppp/contrib/debian/accel-ppp-init	2012-02-17 18:13:50.477566964 +0400
-+++ accel-ppp/contrib/debian/accel-ppp-init	2012-02-17 18:23:14.173560060 +0400
+--- accel-ppp/contrib/debian/accel-ppp-init	2012-05-28 22:55:32.631792523 +0400
++++ accel-ppp/contrib/debian/accel-ppp-init	2012-05-28 22:56:54.391792047 +0400
 @@ -11,6 +11,12 @@
  set -e
  
  PATH=/bin:/usr/bin:/sbin:/usr/sbin
 +DAEMON=/usr/sbin/accel-pppd
-+CONFFILE=/etc/accel-ppp.conf
++CONFFILE=/etc/accel-ppp/accel-ppp.conf
 +PIDFILE=/var/run/accel-pppd.pid
 +
 +# See if binary is there

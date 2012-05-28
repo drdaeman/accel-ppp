@@ -1,2 +1,3 @@
 0001-accel-ppp-init.patch
 0002-gcc-debug-fix.patch
+0003-cmake-pack-install.patch
