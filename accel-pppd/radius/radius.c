@@ -130,12 +130,6 @@ int rad_proc_attrs(struct rad_req_t *req)
 				a->addr = attr->val.ipv6prefix.prefix;
 				list_add_tail(&a->entry, &req->rpd->ipv6_dp.prefix_list);
 				break;
-			case Framed_Pool:
-				req->rpd->ppp->ipv4_pool_name = _strdup(attr->val.string);
-				break;
-			case Framed_IPv6_Pool:
-				req->rpd->ppp->ipv6_pool_name = _strdup(attr->val.string);
-				break;
 			case Chargeable_User_Identity:
 				if (req->rpd->ppp->chargeable_identity)
 				    _free(req->rpd->ppp->chargeable_identity);
@@ -577,7 +571,7 @@ static int load_config(void)
 
 	opt = conf_get_opt("radius", "req-limit");
 	if (opt)
-		conf_fail_time = atoi(opt);
+		conf_req_limit = atoi(opt);
 
 	return 0;
 }
