@@ -1,3 +1,9 @@
+accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom2) oneiric; urgency=low
+
+  * Quick workaround against a segfault at triton.c:204
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Wed, 11 Jul 2012 13:25:00 +0400
+
 accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Upstream Git changes up to 0a823d8d. Most importantly, this fixes
