@@ -621,7 +621,8 @@ static void send_echo_reply(struct ppp_lcp_t *lcp)
 	//uint32_t magic = *(uint32_t *)(hdr + 1);
 
 	lcp->echo_sent = 0;
-	lcp_update_echo_timer(lcp);
+	if (lcp->echo_timer.expire) /* only if timer's already initialized */
+		lcp_update_echo_timer(lcp);
 
 	hdr->code = ECHOREP;
 	*(uint32_t *)(hdr + 1) = htonl(lcp->magic);
