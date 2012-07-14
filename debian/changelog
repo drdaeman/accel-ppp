@@ -1,3 +1,10 @@
+accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom3) oneiric; urgency=low
+
+  * Better fix for segfaults on uninitialized LCP echo timer,
+    see upstream bug #3543985 for details.
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Wed, 14 Jul 2012 17:17:00 +0400
+
 accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom2) oneiric; urgency=low
 
   * Quick workaround against a segfault at triton.c:204
