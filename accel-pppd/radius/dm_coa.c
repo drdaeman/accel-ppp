@@ -159,6 +159,8 @@ static void disconnect_request(struct radius_pd_t *rpd)
 
 static void coa_request(struct radius_pd_t *rpd)
 {
+	struct rad_attr_t *class;
+	void *prev_class;
 	struct ev_radius_t ev = {
 		.ppp = rpd->ppp,
 		.request = rpd->dm_coa_req->pack,
@@ -173,6 +175,28 @@ static void coa_request(struct radius_pd_t *rpd)
 
 	if (ev.res)
 		__sync_add_and_fetch(&rpd->dm_coa_req->res, 1);
+	else {
+		class = rad_packet_find_attr(rpd->dm_coa_req, NULL, "Class");
+		if (class) {
+			prev_class = rpd->attr_class;
+
+			if (rpd->attr_class_len < class->len) {
+				if (rpd->attr_class)
+					_free(rpd->attr_class);
+				rpd->attr_class = _malloc(class->len);
+			}
+
+			memcpy(rpd->attr_class, class->val.octets, class->len);
+			rpd->attr_class_len = class->len;
+		}
+
+		if (rpd->acct_req && rpd->acct_req->pack) {
+			if (prev_class)
+				rad_packet_change_octets(rpd->acct_req->pack, NULL, "Class", rpd->attr_class, rpd->attr_class_len);
+			else
+				rad_packet_add_octets(rpd->acct_req->pack, NULL, "Class", rpd->attr_class, rpd->attr_class_len);
+		}
+	}
 	
 	dm_coa_free(rpd);
 }
