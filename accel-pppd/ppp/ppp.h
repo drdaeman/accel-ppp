@@ -76,6 +76,7 @@ struct ppp_ctrl_t
 	struct triton_context_t *ctx;
 	int type;
 	const char *name;
+	const char *def_pool;
 	int max_mtu;
 	int mppe;
 	char *calling_station_id;
@@ -181,6 +182,9 @@ int ppp_chan_send(struct ppp_t *ppp, void *data, int size);
 int ppp_unit_send(struct ppp_t *ppp, void *data, int size);
 void lcp_send_proto_rej(struct ppp_t *ppp, uint16_t proto);
 void ppp_recv_proto_rej(struct ppp_t *ppp, uint16_t proto);
+
+void ppp_ifup(struct ppp_t *ppp);
+void ppp_ifdown(struct ppp_t *ppp);
 
 struct ppp_fsm_t* ppp_lcp_init(struct ppp_t *ppp);
 void ppp_layer_started(struct ppp_t *ppp,struct ppp_layer_data_t*);

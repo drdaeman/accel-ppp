@@ -81,6 +81,7 @@ char *conf_pado_delay;
 int conf_tr101 = 1;
 int conf_padi_limit = 0;
 int conf_mppe = MPPE_UNSET;
+static char *conf_ip_pool;
 int conf_reply_exact_service = 0;
 char *conf_service_names[MAX_SERVICE_NAMES];
 
@@ -267,6 +268,7 @@ static struct pppoe_conn_t *allocate_channel(struct pppoe_serv_t *serv, const ui
 	conn->ctrl.type = CTRL_TYPE_PPPOE;
 	conn->ctrl.name = "pppoe";
 	conn->ctrl.mppe = conf_mppe;
+	conn->ctrl.def_pool = conf_ip_pool;
 
 	conn->ctrl.calling_station_id = _malloc(IFNAMSIZ + 19);
 	conn->ctrl.called_station_id = _malloc(IFNAMSIZ + 19);
@@ -783,6 +785,7 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	struct delayed_pado_t *pado;
 	char **service_names = NULL;
 	struct timespec ts;
+	int len;
 
 	__sync_add_and_fetch(&stat_PADI_recv, 1);
 
@@ -801,10 +804,8 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 		return;
 	}
 
-	if (hdr->sid) {
-		log_warn("pppoe: discarding PADI packet (sid is not zero)\n");
+	if (hdr->sid)
 		return;
-	}
 
 	if (conf_verbose) {
 		log_info2("recv ");
@@ -817,8 +818,11 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	else if (conf_service_names[0])
 		service_names = conf_service_names;
 
-	for (n = 0; n < ntohs(hdr->length); n += sizeof(*tag) + ntohs(tag->tag_len)) {
+	len = ntohs(hdr->length);
+	for (n = 0; n < len; n += sizeof(*tag) + ntohs(tag->tag_len)) {
 		tag = (struct pppoe_tag *)(pack + ETH_HLEN + sizeof(*hdr) + n);
+		if (n + sizeof(*tag) + ntohs(tag->tag_len) > len)
+			return;
 		switch (ntohs(tag->tag_type)) {
 			case TAG_END_OF_LIST:
 				break;
@@ -846,6 +850,11 @@ static void pppoe_recv_PADI(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 				relay_sid_tag = tag;
 				break;
 		}
+	}
+
+	if (conf_verbose) {
+		log_info2("recv ");
+		print_packet(pack);
 	}
 
 	if (!service_match) {
@@ -1586,9 +1595,9 @@ static void load_config(void)
 
 	opt = conf_get_opt("pppoe", "ifname-in-sid");
 	if (opt) {
-		if (!strcmp(opt, "called-sid"))
+		if (!strcmp(opt, "calling-sid"))
 			conf_ifname_in_sid = 1;
-		else if (!strcmp(opt, "calling-sid"))
+		else if (!strcmp(opt, "called-sid"))
 			conf_ifname_in_sid = 2;
 		else if (!strcmp(opt, "both"))
 			conf_ifname_in_sid = 3;
@@ -1622,6 +1631,13 @@ static void load_config(void)
 		else if (strcmp(opt, "require") == 0)
 			conf_mppe = MPPE_REQUIRE;
 	}
+	
+	opt = conf_get_opt("pppoe", "ip-pool");
+	if (opt) {
+		if (!conf_ip_pool || strcmp(conf_ip_pool, opt))
+			conf_ip_pool = _strdup(opt);
+	} else
+		conf_ip_pool = NULL;
 }
 
 static void pppoe_init(void)
