@@ -1,3 +1,9 @@
+accel-ppp (1.7.1~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
+
+  * Upstream release 1.7.1 (with Alphacom custom patches merged in)
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Sun, 05 Aug 2012 19:14:00 +0400
+
 accel-ppp (1.6.1.99~0alphacom2-0ubuntu1~0custom3) oneiric; urgency=low
 
   * Better fix for segfaults on uninitialized LCP echo timer,
