@@ -129,11 +129,13 @@ static void set_verbose_help(char * const *f, int f_cnt, void *cli)
 	cli_send(cli, "pppoe set PADO-delay <delay[,delay1:count1[,delay2:count2[,...]]]> - set PADO delays (ms)\r\n");
 	cli_send(cli, "pppoe set Service-Name <name>[ <name> [...]] - set Service-Names to respond\r\n");
 	cli_send(cli, "pppoe set Service-Name * - respond with client's Service-Name\r\n");
+	cli_send(cli, "pppoe set Reply-Exact-Service (1|0) - set Reply-Exact-Service setting\r\n";
 	cli_send(cli, "pppoe set AC-Name <name> - set AC-Name tag value\r\n");
 	cli_send(cli, "pppoe show verbose - show current verbose value\r\n");
 	cli_send(cli, "pppoe show PADO-delay - show current PADO delay value\r\n");
 	cli_send(cli, "pppoe show Service-Name - show current Service-Names\r\n");
 	cli_send(cli, "pppoe show AC-Name - show current AC-Name tag value\r\n");
+	cli_send(cli, "pppoe show Reply-Exact-Service - show current Reply-Exact-Service setting\r\n";
 }
 
 static int show_verbose_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
@@ -179,6 +181,16 @@ static int show_ac_name_exec(const char *cmd, char * const *f, int f_cnt, void *
 	
 	cli_sendv(cli, "%s\r\n", conf_ac_name);
 	
+	return CLI_CMD_OK;
+}
+
+static int show_reply_exact_service_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
+{
+	if (f_cnt != 3)
+		return CLI_CMD_SYNTAX;
+
+	cli_sendv(cli, "%d (%s)\r\n", conf_reply_exact_service, conf_reply_exact_service ? "enabled" : "disabled");
+
 	return CLI_CMD_OK;
 }
 
@@ -243,6 +255,21 @@ static int set_ac_name_exec(const char *cmd, char * const *f, int f_cnt, void *c
 	
 	return CLI_CMD_OK;
 }
+
+static int set_reply_exact_service_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
+{
+	if (f_cnt != 4)
+		return CLI_CMD_SYNTAX;
+
+	if (!strcmp(f[3], "0") || !strcmp(f[3], "no") || !strcmp(f[3], "off") || !strcmp(f[3], "disabled"))
+		conf_reply_exact_service = 0;
+	else if (!strcmp(f[3], "1") || !strcmp(f[3], "yes") || !strcmp(f[3], "on") || !strcmp(f[3], "enabled"))
+		conf_reply_exact_service = 1;
+	else
+		return CLI_CMD_INVAL;
+
+	return CLI_CMD_OK;
+}
 //===================================
 
 
@@ -254,10 +281,12 @@ static void init(void)
 	cli_register_simple_cmd2(set_pado_delay_exec, NULL, 3, "pppoe", "set", "PADO-delay");
 	cli_register_simple_cmd2(set_service_name_exec, NULL, 3, "pppoe", "set", "Service-Name");
 	cli_register_simple_cmd2(set_ac_name_exec, NULL, 3, "pppoe", "set", "AC-Name");
+	cli_register_simple_cmd2(set_reply_exact_service_exec, NULL, 3, "pppoe", "set", "Reply-Exact-Service");
 	cli_register_simple_cmd2(show_verbose_exec, NULL, 3, "pppoe", "show", "verbose");
 	cli_register_simple_cmd2(show_pado_delay_exec, NULL, 3, "pppoe", "show", "PADO-delay");
 	cli_register_simple_cmd2(show_service_name_exec, NULL, 3, "pppoe", "show", "Service-Name");
 	cli_register_simple_cmd2(show_ac_name_exec, NULL, 3, "pppoe", "show", "AC-Name");
+	cli_register_simple_cmd2(show_reply_exact_service_exec, NULL, 3, "pppoe", "show", "Reply-Exact-Service");
 }
 
 DEFINE_INIT(22, init);
