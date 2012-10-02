@@ -920,10 +920,16 @@ static int l2tp_conn_read(struct triton_md_handler_t *h)
 	struct l2tp_conn_t *conn = container_of(h, typeof(*conn), hnd);
 	struct l2tp_packet_t *pack, *p;
 	struct l2tp_attr_t *msg_type;
+	int res;
 
 	while (1) {
-		if (l2tp_recv(h->fd, &pack, NULL))
+		res = l2tp_recv(h->fd, &pack, NULL);
+		if (res) {
+			if (res == -2)
+				/* No peer listening, tear down connection */
+				l2tp_disconnect(conn);
 			return 0;
+		}
 
 		if (!pack)
 			continue;
@@ -955,10 +961,10 @@ static int l2tp_conn_read(struct triton_md_handler_t *h)
 		} else {
 			if (ntohs(pack->hdr.Ns) < conn->Nr + 1 || (ntohs(pack->hdr.Ns > 32767 && conn->Nr + 1 < 32767))) {
 				log_ppp_debug("duplicate packet\n");
-				//if (l2tp_send_ZLB(conn))
-				//	goto drop;
 				if (!list_empty(&conn->send_queue))
 					l2tp_retransmit(conn);
+				else if (l2tp_send_ZLB(conn))
+					goto drop;
 			} else
 				log_ppp_debug("reordered packet\n");
 			l2tp_packet_free(pack);
