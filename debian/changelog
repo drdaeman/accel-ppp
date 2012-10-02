@@ -1,3 +1,9 @@
+accel-ppp (1.7.2~0alphacom1-0ubuntu1~0custom1) oneiric; urgency=low
+
+  * Upstream release 1.7.2 (with Alphacom custom patches)
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Tue, 02 Oct 2012 23:15:50 +0400
+
 accel-ppp (1.7.1~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Upstream release 1.7.1 (with Alphacom custom patches merged in)
