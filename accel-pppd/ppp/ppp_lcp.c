@@ -603,7 +603,7 @@ static void lcp_recv_echo_repl(struct ppp_lcp_t *lcp, uint8_t *data, int size)
 		if (conf_ppp_verbose)
 			log_ppp_debug("recv [LCP EchoRep id=%x]\n", lcp->fsm.recv_id);
 	} else {
-		magic = *(uint32_t *)data;
+		magic = ntohl(*(uint32_t *)data);
 
 		if (conf_ppp_verbose)
 			log_ppp_debug("recv [LCP EchoRep id=%x <magic %x>]\n", lcp->fsm.recv_id, magic);
@@ -639,9 +639,9 @@ static void send_echo_reply(struct ppp_lcp_t *lcp)
 static void send_echo_request(struct triton_timer_t *t)
 {
 	struct ppp_lcp_t *lcp = container_of(t, typeof(*lcp), echo_timer);
-	struct ifpppstatsreq ifreq;
-	int f = 0;
+	int f = 0, r;
 	time_t ts;
+	struct rtnl_link_stats stats;
 	struct lcp_echo_req_t
 	{
 		struct lcp_hdr_t hdr;
@@ -651,27 +651,20 @@ static void send_echo_request(struct triton_timer_t *t)
 		.hdr.code = ECHOREQ,
 		.hdr.id = lcp->fsm.id++,
 		.hdr.len = htons(8),
-		.magic = lcp->magic,
+		.magic = htonl(lcp->magic),
 	};
 
 	++lcp->echo_sent;
 
+	r = ppp_read_stats(lcp->ppp, &stats);
+
 	if (conf_echo_timeout) {
 		if (lcp->echo_sent == 2) {
-			memset(&ifreq, 0, sizeof(ifreq));
-			ifreq.stats_ptr = (void *)&ifreq.stats;
-			strcpy(ifreq.ifr__name, lcp->ppp->ifname);
-		
-			if (ioctl(sock_fd, SIOCGPPPSTATS, &ifreq) == 0)
-				lcp->last_ipackets = ifreq.stats.p.ppp_ipackets;
-
+			lcp->last_ipackets = stats.rx_packets;
 			time(&lcp->last_echo_ts);
 		} else if (lcp->echo_sent > 2) {
 			time(&ts);
-			memset(&ifreq, 0, sizeof(ifreq));
-			ifreq.stats_ptr = (void *)&ifreq.stats;
-			strcpy(ifreq.ifr__name, lcp->ppp->ifname);
-			if (ioctl(sock_fd, SIOCGPPPSTATS, &ifreq) == 0 && lcp->last_ipackets != ifreq.stats.p.ppp_ipackets) {
+			if (r == 0 && lcp->last_ipackets != stats.rx_packets) {
 				lcp->echo_sent = 1;
 				lcp_update_echo_timer(lcp);
 			} else if (ts - lcp->last_echo_ts > conf_echo_timeout) {
@@ -691,7 +684,7 @@ static void send_echo_request(struct triton_timer_t *t)
 	}
 
 	if (conf_ppp_verbose) {
-		log_ppp_debug("send [LCP EchoReq id=%x <magic %x>]\n", msg.hdr.id, msg.magic);
+		log_ppp_debug("send [LCP EchoReq id=%x <magic %x>]\n", msg.hdr.id, lcp->magic);
 		ppp_chan_send(lcp->ppp,&msg,ntohs(msg.hdr.len)+2);
 	}
 }
@@ -859,7 +852,7 @@ static void lcp_recv(struct ppp_handler_t*h)
 			break;
 		case ECHOREQ:
 			if (conf_ppp_verbose)
-				log_ppp_debug("recv [LCP EchoReq id=%x <magic %x>]\n", hdr->id, *(uint32_t*)(hdr + 1));
+				log_ppp_debug("recv [LCP EchoReq id=%x <magic %x>]\n", hdr->id, ntohl(*(uint32_t*)(hdr + 1)));
 			send_echo_reply(lcp);
 			break;
 		case ECHOREP:
@@ -867,7 +860,7 @@ static void lcp_recv(struct ppp_handler_t*h)
 			break;
 		case PROTOREJ:
 			if (conf_ppp_verbose)
-				log_ppp_info2("recv [LCP ProtoRej id=%x <%04x>]\n", hdr->code, hdr->id, ntohs(*(uint16_t*)(hdr + 1)));
+				log_ppp_info2("recv [LCP ProtoRej id=%x <%04x>]\n", hdr->id, ntohs(*(uint16_t*)(hdr + 1)));
 			ppp_recv_proto_rej(lcp->ppp, ntohs(*(uint16_t *)(hdr + 1)));
 			break;
 		case IDENT:

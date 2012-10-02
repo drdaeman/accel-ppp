@@ -147,15 +147,18 @@ int l2tp_recv(int fd, struct l2tp_packet_t **p, struct in_pktinfo *pkt_info)
 
 	if (n < 0) {
 		mempool_free(buf);
-		if (errno == EAGAIN)
+		if (errno == EAGAIN) {
 			return -1;
+		} else if (errno == ECONNREFUSED) {
+			return -2;
+		}
 		log_error("l2tp: recv: %s\n", strerror(errno));
 		return 0;
 	}
 
 	if (n < sizeof(*hdr)) {
 		if (conf_verbose)
-			log_warn("l2tp: short packet received (%i/%i)\n", n, sizeof(*hdr));
+			log_warn("l2tp: short packet received (%i/%zu)\n", n, sizeof(*hdr));
 		goto out_err_hdr;
 	}
 

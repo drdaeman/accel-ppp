@@ -36,7 +36,7 @@ static int conf_interval = 0;
 static int conf_max_failure = 3;
 static char *conf_msg_failure = "E=691 R=0 V=3";
 static char *conf_msg_failure2 = "Authentication failure";
-static char *conf_msg_success = "Authentication successed";
+static char *conf_msg_success = "Authentication succeeded";
 
 struct chap_hdr_t
 {
@@ -205,7 +205,7 @@ static void chap_send_failure(struct chap_auth_data_t *ad, char *mschap_error, c
 	sprintf((char *)(hdr + 1), "%s M=%s", mschap_error, reply_msg);
 	
 	if (conf_ppp_verbose)
-		log_ppp_info2("send [MSCHAP-v2 Failure id=%x \"%s\"]\n", hdr->id, hdr + 1);
+		log_ppp_info2("send [MSCHAP-v2 Failure id=%x \"%s\"]\n", hdr->id, (char *)(hdr + 1));
 
 	ppp_chan_send(ad->ppp, hdr, ntohs(hdr->len) + 2);
 
@@ -223,7 +223,7 @@ static void chap_send_success(struct chap_auth_data_t *ad, struct chap_response_
 	sprintf((char *)(hdr + 1), "S=%s M=%s", authenticator, conf_msg_success);
 
 	if (conf_ppp_verbose)
-		log_ppp_info2("send [MSCHAP-v2 Success id=%x \"%s\"]\n", hdr->id, hdr + 1);
+		log_ppp_info2("send [MSCHAP-v2 Success id=%x \"%s\"]\n", hdr->id, (char *)(hdr + 1));
 
 	ppp_chan_send(ad->ppp, hdr, ntohs(hdr->len) + 2);
 
@@ -396,7 +396,7 @@ static void chap_recv_response(struct chap_auth_data_t *ad, struct chap_hdr_t *h
 		_free(name);
 	} else {
 		if (!ad->started) {
-			if (ppp_auth_successed(ad->ppp, name)) {
+			if (ppp_auth_succeeded(ad->ppp, name)) {
 				chap_send_failure(ad, mschap_error, reply_msg);
 				ppp_terminate(ad->ppp, TERM_AUTH_ERROR, 0);
 				_free(name);

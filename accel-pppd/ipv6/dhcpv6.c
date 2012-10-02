@@ -173,7 +173,8 @@ static void insert_dp_routes(struct ppp_t *ppp, struct dhcpv6_pd *pd)
 			if (ioctl(sock6_fd, SIOCADDRT, &rt6)) {
 				err = errno;
 				inet_ntop(AF_INET6, &p->addr, str1, sizeof(str1));
-				log_ppp_error("dhcpv6: route add %s/%i: %s\n", str1, p->prefix_len);
+				log_ppp_error("dhcpv6: route add %s/%i: %s\n",
+					      str1, p->prefix_len, strerror(err));
 			} else if (conf_verbose) {
 				inet_ntop(AF_INET6, &p->addr, str1, sizeof(str1));
 				log_ppp_info2("dhcpv6: route add %s/%i\n", str1, p->prefix_len);
@@ -878,7 +879,7 @@ static void load_dns(void)
 				continue;
 
 			if (inet_pton(AF_INET6, opt->val ? opt->val : opt->name, &conf_dns[conf_dns_count]) == 0) {
-				log_error("dnsv6: faild to parse '%s'\n", opt->name);
+				log_error("dnsv6: failed to parse '%s'\n", opt->name);
 				continue;
 			}
 			conf_dns_count++;

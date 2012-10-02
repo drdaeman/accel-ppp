@@ -1,0 +1,13 @@
+# -*- text -*-
+#
+# dictionary.alphacom
+# VSAs for Alphacom LLC. <http://netwi.ru/>
+#
+
+VENDOR          Alphacom                 35484
+
+BEGIN-VENDOR    Alphacom
+ATTRIBUTE       Speed-Limits             230    string
+ATTRIBUTE       User-Session-ID          231    string
+ATTRIBUTE       User-Subscription-ID     232    string
+END-VENDOR      Alphacom
