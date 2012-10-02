@@ -97,6 +97,7 @@ extern int conf_verbose;
 extern char *conf_service_names[MAX_SERVICE_NAMES];
 extern char *conf_ac_name;
 extern char *conf_pado_delay;
+extern int conf_reply_exact_service;
 
 extern unsigned int stat_active;
 extern unsigned int stat_delayed_pado;

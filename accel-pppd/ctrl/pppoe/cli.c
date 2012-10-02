@@ -129,13 +129,13 @@ static void set_verbose_help(char * const *f, int f_cnt, void *cli)
 	cli_send(cli, "pppoe set PADO-delay <delay[,delay1:count1[,delay2:count2[,...]]]> - set PADO delays (ms)\r\n");
 	cli_send(cli, "pppoe set Service-Name <name>[ <name> [...]] - set Service-Names to respond\r\n");
 	cli_send(cli, "pppoe set Service-Name * - respond with client's Service-Name\r\n");
-	cli_send(cli, "pppoe set Reply-Exact-Service (1|0) - set Reply-Exact-Service setting\r\n";
+	cli_send(cli, "pppoe set Reply-Exact-Service (1|0|yes|no) - set Reply-Exact-Service setting\r\n");
 	cli_send(cli, "pppoe set AC-Name <name> - set AC-Name tag value\r\n");
 	cli_send(cli, "pppoe show verbose - show current verbose value\r\n");
 	cli_send(cli, "pppoe show PADO-delay - show current PADO delay value\r\n");
 	cli_send(cli, "pppoe show Service-Name - show current Service-Names\r\n");
 	cli_send(cli, "pppoe show AC-Name - show current AC-Name tag value\r\n");
-	cli_send(cli, "pppoe show Reply-Exact-Service - show current Reply-Exact-Service setting\r\n";
+	cli_send(cli, "pppoe show Reply-Exact-Service - show current Reply-Exact-Service setting\r\n");
 }
 
 static int show_verbose_exec(const char *cmd, char * const *f, int f_cnt, void *cli)
