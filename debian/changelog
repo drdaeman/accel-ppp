@@ -1,4 +1,4 @@
-accel-ppp (1.7.2~0alphacom1-0ubuntu1~0custom1) oneiric; urgency=low
+accel-ppp (1.7.2~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Upstream release 1.7.2 (with Alphacom custom patches)
 
