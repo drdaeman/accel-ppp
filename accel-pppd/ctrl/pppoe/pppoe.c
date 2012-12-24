@@ -27,6 +27,7 @@
 #include "radius.h"
 #endif
 
+#include "iputils.h"
 #include "connlimit.h"
 
 #include "pppoe.h"
@@ -74,6 +75,13 @@ struct padi_t
 	uint8_t addr[ETH_ALEN];
 };
 
+struct iplink_arg
+{
+	pcre *re;
+	const char *opt;
+	void *cli;
+};
+
 int conf_verbose;
 char *conf_ac_name;
 int conf_ifname_in_sid;
@@ -109,6 +117,7 @@ static void pppoe_send_PADT(struct pppoe_conn_t *conn);
 static void _server_stop(struct pppoe_serv_t *serv);
 void pppoe_server_free(struct pppoe_serv_t *serv);
 static int init_secret(struct pppoe_serv_t *serv);
+static void __pppoe_server_start(const char *ifname, const char *opt, void *cli);
 
 static void disconnect(struct pppoe_conn_t *conn)
 {
@@ -1323,7 +1332,68 @@ static int parse_interface_options(const char *ifopt, struct pppoe_serv_t *serv,
 	return 0;
 }
 
+static int __pppoe_add_interface_re(int index, int flags, const char *name, struct iplink_arg *arg)
+{
+	if (pcre_exec(arg->re, NULL, name, strlen(name), 0, 0, NULL, 0) < 0)
+		return 0;
+
+	__pppoe_server_start(name, arg->opt, arg->cli);
+
+	return 0;
+}
+
+static void pppoe_add_interface_re(const char *opt, void *cli)
+{
+	pcre *re = NULL;
+	const char *pcre_err;
+	char *pattern;
+	const char *ptr;
+	int pcre_offset;
+	struct iplink_arg arg;
+
+	for (ptr = opt; *ptr && *ptr != ','; ptr++);
+	
+	pattern = _malloc(ptr - (opt + 3) + 1);
+	memcpy(pattern, opt + 3, ptr - (opt + 3));
+	pattern[ptr - (opt + 3)] = 0;
+	
+	re = pcre_compile2(pattern, 0, NULL, &pcre_err, &pcre_offset, NULL);
+		
+	if (!re) {
+		log_error("pppoe: %s at %i\r\n", pcre_err, pcre_offset);
+		return;
+	}
+
+	arg.re = re;
+	arg.opt = ptr;
+	arg.cli = cli;
+
+	iplink_list((iplink_list_func)__pppoe_add_interface_re, &arg);
+
+	pcre_free(re);
+	_free(pattern);
+}
+
 void pppoe_server_start(const char *opt, void *cli)
+{
+	char name[IFNAMSIZ];
+	const char *ptr;
+
+	if (strlen(opt) > 3 && memcmp(opt, "re:", 3) == 0) {
+		pppoe_add_interface_re(opt, cli);
+		return;
+	}
+
+	ptr = strchr(opt, ',');
+	if (ptr) {
+		memcpy(name, opt, ptr - opt);
+		name[ptr - opt] = 0;
+		__pppoe_server_start(name, ptr, cli);
+	} else
+		__pppoe_server_start(opt, opt, cli);
+}
+
+static void __pppoe_server_start(const char *ifname, const char *opt, void *cli)
 {
 	struct pppoe_serv_t *serv;
 	int sock;
