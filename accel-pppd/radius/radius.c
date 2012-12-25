@@ -18,10 +18,6 @@
 
 #include "memdebug.h"
 
-#define CHAP_MD5 5
-#define MSCHAP_V1 0x80
-#define MSCHAP_V2 0x81
-
 int conf_max_try = 3;
 int conf_timeout = 3;
 int conf_acct_timeout = 3;
@@ -59,9 +55,11 @@ int rad_proc_attrs(struct rad_req_t *req)
 	struct rad_attr_t *attr;
 	struct ipv6db_addr_t *a;
 	struct ev_dns_t dns;
+	struct ev_wins_t wins;
 	int res = 0;
 
 	dns.ppp = NULL;
+	wins.ppp = NULL;
 	req->rpd->acct_interim_interval = conf_acct_interim_interval;
 
 	list_for_each_entry(attr, &req->reply->attrs, entry) {
@@ -74,6 +72,14 @@ int rad_proc_attrs(struct rad_req_t *req)
 				case MS_Secondary_DNS_Server:
 					dns.ppp = req->rpd->ppp;
 					dns.dns2 = attr->val.ipaddr;
+					break;
+				case MS_Primary_NBNS_Server:
+					wins.ppp = req->rpd->ppp;
+					wins.wins1 = attr->val.ipaddr;
+					break;
+				case MS_Secondary_NBNS_Server:
+					wins.ppp = req->rpd->ppp;
+					wins.wins2 = attr->val.ipaddr;
 					break;
 			}
 			continue;
@@ -140,6 +146,8 @@ int rad_proc_attrs(struct rad_req_t *req)
 
 	if (dns.ppp)
 		triton_event_fire(EV_DNS, &dns);
+	if (wins.ppp)
+		triton_event_fire(EV_WINS, &wins);
 
 	return res;
 }

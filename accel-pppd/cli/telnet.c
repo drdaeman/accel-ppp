@@ -501,7 +501,10 @@ static int cln_write(struct triton_md_handler_t *h)
 {
 	struct telnet_client_t *cln = container_of(h, typeof(*cln), hnd);
 	int k;
-	
+
+	if (!cln->xmit_buf)
+		return 0;
+
 	while (1) {
 		for (; cln->xmit_pos < cln->xmit_buf->size; cln->xmit_pos += k) {
 			k = write(cln->hnd.fd, cln->xmit_buf->buf + cln->xmit_pos, cln->xmit_buf->size - cln->xmit_pos);
@@ -518,8 +521,10 @@ static int cln_write(struct triton_md_handler_t *h)
 		_free(cln->xmit_buf);
 		cln->xmit_pos = 0;
 
-		if (list_empty(&cln->xmit_queue))
+		if (list_empty(&cln->xmit_queue)) {
+			cln->xmit_buf = NULL;
 			break;
+		}
 
 		cln->xmit_buf = list_entry(cln->xmit_queue.next, typeof(*cln->xmit_buf), entry);
 		list_del(&cln->xmit_buf->entry);

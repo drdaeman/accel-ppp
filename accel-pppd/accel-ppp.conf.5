@@ -206,6 +206,14 @@ You have to explicitly specify range of ip address from which clients can connec
 .B x.x.x.x-y
 (for example 10.0.0.1-254)
 .TP
+.SH [wins]
+.TP
+.BI "wins1=" x.x.x.x
+Specifies primary NBNS to be sent to peer.
+.TP
+.BI "wins2=" x.x.x.x
+Specifies secondary NBNS to be sent to peer.
+.TP
 .SH [pptp]
 .br
 Configuration of PPTP module.
@@ -238,10 +246,14 @@ Specifies ip pool name for address allocation. Usefull in conjuction with ippool
 .br
 Configuration of PPPoE module.
 .TP
-.BI "interface=" ethX[,padi-limit=n]
+.BI "interface=" [re:]ifname[,padi-limit=n]
 Specifies interface name to listen/send discovery packets. You may specify multiple
 .B interface
-options. Optional
+options. If
+.B ifname
+is prefixed with
+.B re:
+then ifname is considered as regular expression. Optional
 .B padi-limit
 parameter specifies limit of PADI packets to reply on this interface in 1 second period.
 .TP
@@ -488,6 +500,17 @@ Specifies address to use as local address of ppp interfaces if chap-secrets is u
 .TP
 .BI "chap-secrets=" file
 Specifies alternate chap-secrets file location (default is /etc/ppp/chap-secrets).
+.TP
+.BI "encrypted=" 0|1
+Specifies either chap-secrets is encrypted (read README).
+.TP
+.BI "username-hash=" hash1[,hash2]
+Specifies hash chain to calculate username hash.
+.br
+.B hash1
+,
+.B hash2
+are openssl known digest names (md5, sha1, etc).
 .TP
 .SH [ip-pool]
 .br
