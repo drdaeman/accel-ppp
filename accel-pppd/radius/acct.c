@@ -207,7 +207,7 @@ static void rad_acct_interim_update(struct triton_timer_t *t)
 	   2. As a result, an EV_PPP_FINISHING event is fired;
 	   3. ppp_finishing calls rad_acct_stop that cleans up the request. */
 	if (!rpd->acct_req)
-		return
+		return;
 
 	__sync_add_and_fetch(&rpd->acct_req->serv->stat_interim_sent, 1);
 
