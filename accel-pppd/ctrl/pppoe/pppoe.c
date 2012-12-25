@@ -1154,31 +1154,6 @@ static void pppoe_serv_close(struct triton_context_t *ctx)
 	pthread_mutex_unlock(&serv->lock);
 }
 
-static int parse_interface(const char *opt, char **ifname, char **ifopt)
-{
-	char *comma;
-
-	*ifopt = NULL;
-	comma = strchr(opt, ',');
-	if (comma == opt) {
-		/* empty interface name, option starts with comma */
-		return -1;
-	} else if (comma) {
-		comma++;
-		if (*comma) {
-			if (strlen(comma) > 1024) {
-				/* options are too long */
-				return -1;
-			}
-			*ifopt = comma;
-		}
-		*ifname = _strndup(opt, comma - opt - 1);
-	} else {
-		*ifname = _strdup(opt);
-	}
-	return 0;
-}
-
 int pppoe_add_service_name(char **list, const char *item)
 {
 	int i;
@@ -1400,14 +1375,7 @@ static void __pppoe_server_start(const char *ifname, const char *opt, void *cli)
 	int f = 1;
 	struct ifreq ifr;
 	struct sockaddr_ll sa;
-	char *ifname, *ifopt, *errmsg;
-
-	if (parse_interface(opt, &ifname, &ifopt)) {
-		if (cli)
-			cli_sendv(cli, "failed to parse '%s'\r\n", opt);
-		else
-			log_error("pppoe: failed to parse '%s'\r\n", opt);
-	}
+	char *ifopt, *errmsg;
 
 	pthread_rwlock_rdlock(&serv_lock);
 	list_for_each_entry(serv, &serv_list, entry) {
@@ -1513,6 +1481,9 @@ static void __pppoe_server_start(const char *ifname, const char *opt, void *cli)
 
 	serv->padi_limit = conf_padi_limit;
 
+	ifopt = strchr(opt, ',');
+	if (ifopt)
+		ifopt++; /* point after comma, not to it */
 	if (ifopt && parse_interface_options(ifopt, serv, &errmsg)) {
 		if (cli)
 			cli_sendv(cli, "%s\r\n", errmsg);
