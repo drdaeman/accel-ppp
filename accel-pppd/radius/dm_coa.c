@@ -176,7 +176,7 @@ static void coa_request(struct radius_pd_t *rpd)
 	if (ev.res)
 		__sync_add_and_fetch(&rpd->dm_coa_req->res, 1);
 	else {
-		class = rad_packet_find_attr(rpd->dm_coa_req, NULL, "Class");
+		class = rad_packet_find_attr(rpd->dm_coa_req->pack, NULL, "Class");
 		if (class) {
 			prev_class = rpd->attr_class;
 
