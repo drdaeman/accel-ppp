@@ -1,3 +1,12 @@
+accel-ppp (1.7.3-0ubuntu1~0alphacom1) oneiric; urgency=low
+
+  * Upstream release 1.7.3 (with Alphacom custom patches)
+  * Fixes crashing on RADIUS timeout when sending interim accounting data.
+  * Fixes incorrect logging of sent LCP Magic-Numbers for outgoing echo replies.
+  * Cleaner Debian package version number.
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Tue, 25 Dec 2012 19:51:20 +0400
+
 accel-ppp (1.7.2~0alphacom2-0ubuntu1~0custom1) oneiric; urgency=low
 
   * Upstream release 1.7.2 (with Alphacom custom patches)
