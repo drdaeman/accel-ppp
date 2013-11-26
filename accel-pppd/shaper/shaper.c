@@ -460,7 +460,7 @@ static void shaper_change(struct shaper_pd_t *pd)
 		pd->down_speed = pd->temp_down_speed;
 		pd->up_speed = pd->temp_up_speed;
 		install_limiter(pd->ppp, pd->temp_down_speed, 0, pd->temp_up_speed, 0);
-	} else if (pd->cur_tr->down_speed || pd->cur_tr->up_speed) {
+	} else if (pd->cur_tr && (pd->cur_tr->down_speed || pd->cur_tr->up_speed)) {
 		pd->down_speed = pd->cur_tr->down_speed;
 		pd->up_speed = pd->cur_tr->up_speed;
 		install_limiter(pd->ppp, pd->cur_tr->down_speed, pd->cur_tr->down_burst, pd->cur_tr->up_speed, pd->cur_tr->up_burst);
