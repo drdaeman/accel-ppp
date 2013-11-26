@@ -1,3 +1,10 @@
+accel-ppp (1.7.3-0ubuntu1~0alphacom2) oneiric; urgency=low
+
+  * Upstream release 1.7.3 (with Alphacom custom patches)
+  * Fixes possible crashing on shaper modifications.
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Tue, 26 Nov 2013 04:16:00 +0400
+
 accel-ppp (1.7.3-0ubuntu1~0alphacom1) oneiric; urgency=low
 
   * Upstream release 1.7.3 (with Alphacom custom patches)
