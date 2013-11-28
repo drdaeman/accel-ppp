@@ -42,6 +42,9 @@ int conf_accounting;
 int conf_fail_time;
 int conf_req_limit;
 
+static const char *conf_default_realm;
+static int conf_default_realm_len;
+
 static LIST_HEAD(sessions);
 static pthread_rwlock_t sessions_lock = PTHREAD_RWLOCK_INITIALIZER;
 
@@ -90,7 +93,7 @@ int rad_proc_attrs(struct rad_req_t *req)
 			case Framed_IP_Address:
 				if (!conf_gw_ip_address)
 					log_ppp_warn("radius: gw-ip-address not specified, cann't assign IP address...\n");
-				else {
+				else if (attr->val.ipaddr != 0xfffffffe) {
 					req->rpd->ipv4_addr.owner = &ipdb;
 					req->rpd->ipv4_addr.peer_addr = attr->val.ipaddr;
 					req->rpd->ipv4_addr.addr = conf_gw_ip_address;
@@ -152,12 +155,27 @@ int rad_proc_attrs(struct rad_req_t *req)
 	return res;
 }
 
-static int check(struct pwdb_t *pwdb, struct ppp_t *ppp, const char *username, int type, va_list _args)
+static int rad_pwdb_check(struct pwdb_t *pwdb, struct ppp_t *ppp, const char *username, int type, va_list _args)
 {
 	int r = PWDB_NO_IMPL;
 	va_list args;
 	int chap_type;
 	struct radius_pd_t *rpd = find_pd(ppp);
+	char username1[256];
+
+	if (conf_default_realm && !strchr(username, '@')) {
+		int len = strlen(username);
+		if (len + conf_default_realm_len >= 256 - 2) {
+			log_ppp_error("radius: username is too large to append realm\n");
+			return PWDB_DENIED;
+		}
+		
+		memcpy(username1, username, len);
+		username1[len] = '@';
+		memcpy(username1 + len + 1, conf_default_realm, conf_default_realm_len);
+		username1[len + 1 + conf_default_realm_len] = 0;
+		username = username1;
+	}
 
 	va_copy(args, _args);
 
@@ -378,6 +396,8 @@ int rad_find_sessions_pack(struct rad_packet_t *pack, int (*callback)(struct rad
 	unsigned int count = 0;
 	
 	list_for_each_entry(attr, &pack->attrs, entry) {
+		if (attr->vendor)
+			continue;
 		switch(attr->attr->id) {
 			case Acct_Session_Id:
 				sessionid = attr->val.string;
@@ -464,7 +484,7 @@ static struct ipdb_t ipdb = {
 };
 
 static struct pwdb_t pwdb = {
-	.check = check,
+	.check = rad_pwdb_check,
 };
 
 static int parse_server(const char *opt, in_addr_t *addr, int *port, char **secret)
@@ -518,13 +538,13 @@ static int load_config(void)
 		conf_acct_timeout = atoi(opt);
 
 	opt = conf_get_opt("radius", "verbose");
-	if (opt && atoi(opt) > 0)
-		conf_verbose = 1;
-	
+	if (opt && atoi(opt) >= 0)
+		conf_verbose = atoi(opt) > 0;
+
 	opt = conf_get_opt("radius", "interim-verbose");
-	if (opt && atoi(opt) > 0)
-		conf_interim_verbose = 1;
-	
+	if (opt && atoi(opt) >= 0)
+		conf_interim_verbose = atoi(opt) > 0;
+
 	opt = conf_get_opt("radius", "nas-ip-address");
 	if (opt)
 		conf_nas_ip_address = inet_addr(opt);
@@ -580,6 +600,10 @@ static int load_config(void)
 	opt = conf_get_opt("radius", "req-limit");
 	if (opt)
 		conf_req_limit = atoi(opt);
+	
+	conf_default_realm = conf_get_opt("radius", "default-realm");
+	if (conf_default_realm)
+		conf_default_realm_len = strlen(conf_default_realm);
 
 	return 0;
 }
