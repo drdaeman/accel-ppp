@@ -1,11 +1,1 @@
-# Config file for /etc/init.d/accel-ppp
-#
-
-# Location of the configuration file.
-
-#CONFFILE="/etc/accel-ppp/accel-ppp.conf"
-
-# If you want to override options accel-pppd is run with,
-# you can do it here.
-
-#ACCEL_PPPD_OPTS="-c $CONFFILE"
+../contrib/debian/accel-ppp-default
