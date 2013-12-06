@@ -1,5 +1,5 @@
 #!/bin/sh
-# /etc/init.d/accel-pppd: set up the accel-ppp server
+# /etc/init.d/accel-ppp: set up the accel-ppp server
 ### BEGIN INIT INFO
 # Provides:          accel-ppp
 # Required-Start:    $networking
@@ -11,49 +11,84 @@
 set -e
 
 PATH=/bin:/usr/bin:/sbin:/usr/sbin
+DAEMON="/usr/sbin/accel-pppd"
+NAME="accel-pppd"
+DESC="PPtP/L2TP/PPPoE server"
+PIDFILE="/var/run/${NAME}.pid"
+CONFFILE="/etc/accel-ppp.conf"
 
+test -x "$DAEMON" || exit 0
 . /lib/lsb/init-functions
 
-if test -f /etc/default/accel-ppp; then
-    . /etc/default/accel-ppp
+ACCEL_PPPD_OPTS="-c $CONFFILE"
+[ -r /etc/default/accel-ppp ] && ./etc/default/accel-ppp
+
+if [ -z "$ACCEL_PPPD_OPTS" ]; then
+  # Exit if no custom options are set and configuration file does not exists
+  test -f $CONFFILE || exit 0
+  ACCEL_PPPD_OPTS="-c $CONFFILE"
 fi
 
-if [ -z $ACCEL_PPPD_OPTS ]; then
-  ACCEL_PPPD_OPTS="-c /etc/accel-ppp.conf"
-fi
+
+is_true() {
+    if [ "x$1" = "xtrue" -o "x$1" = "xyes" -o "x$1" = "x1" ] ; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+do_start() {
+    if is_true "$START" ; then
+        start-stop-daemon --start --quiet --oknodo --exec "$DAEMON" -- -d -p "$PIDFILE" $ACCEL_PPPD_OPTS
+    else
+        echo ""
+        echo "accel-pppd is not configured to start, please edit /etc/default/accel-ppp to enable"
+    fi
+}
+
+do_stop() {
+    start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile "$PIDFILE"
+}
+
+do_reload() {
+    start-stop-daemon --stop --signal USR1 --quiet --pidfile "$PIDFILE"
+}
+
 
 case "$1" in
-  start)
-	log_daemon_msg "Starting PPtP/L2TP/PPPoE server" "accel-pppd"
-	if start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/accel-pppd -- -d -p /var/run/accel-pppd.pid $ACCEL_PPPD_OPTS; then
-	    log_end_msg 0
-	else
-	    log_end_msg 1
-	fi
-  ;;
-  restart)
-	log_daemon_msg "Restarting PPtP/L2TP/PPPoE server" "accel-pppd"
-	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile /var/run/accel-pppd.pid
-	if start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/accel-pppd -- -d -p /var/run/accel-pppd.pid $ACCEL_PPPD_OPTS; then
-	    log_end_msg 0
-	else
-	    log_end_msg 1
-	fi
-  ;;
+    start)
+        log_begin_msg "Starting $DESC"
+        do_start
+        log_end_msg $?
+        ;;
 
-  stop)
-	log_daemon_msg "Stopping PPtP/L2TP/PPPoE server" "accel-pppd"
-	start-stop-daemon --stop --quiet --oknodo --retry 180 --pidfile /var/run/accel-pppd.pid
-	log_end_msg 0
-  ;;
+    stop)
+        log_daemon_msg "Stopping $DESC"
+        do_stop
+        log_end_msg $?
+        ;;
 
-  status)
-	status_of_proc /usr/sbin/accel-pppd "accel-pppd"
-  ;;
-  *)
-    log_success_msg "Usage: /etc/init.d/accel-ppp {start|stop|status|restart}"
-    exit 1
-    ;;
+    restart|force-reload)
+        log_begin_msg "Restarting $DESC"
+        do_stop
+        sleep 1
+        do_start
+        log_end_msg $?
+        ;;
+
+    status)
+        status_of_proc -p "$PIDFILE" "$DAEMON" "$NAME"
+        ;;
+
+    reload)
+        log_begin_msg "Reloading $DESC configuration"
+        do_reload
+        log_end_msg $?
+        ;;
+
+    *)
+        echo "Usage: /etc/init.d/accel-ppp {start|stop|status|restart|reload|force-reload}" >&2
+        exit 1
+        ;;
 esac
-
-exit 0

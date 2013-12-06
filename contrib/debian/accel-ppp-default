@@ -1,5 +1,11 @@
-# Config file for /etc/init.d/accel-pppd
+# Defaults for /etc/init.d/accel-ppp
 
-# Any extra options you want to pass to aceel-pptpd
-# on start-up should be put here.
-ACCEL_PPPD_OPTS="-c /etc/accel-ppp.conf"
+# Set START to "yes" to start accel-pppd
+START="no"
+
+# Location of the configuration file
+CONFFILE="/etc/accel-ppp.conf"
+
+# If you want to override options accel-pppd is run with,
+# you can do it here.
+ACCEL_PPPD_OPTS="-c $CONFFILE"
