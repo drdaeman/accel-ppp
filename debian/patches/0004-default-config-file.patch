@@ -1,0 +1,11 @@
+--- accel-ppp/contrib/debian/accel-ppp-default	2013-12-06 13:52:06.044086854 +0400
++++ accel-ppp/contrib/debian/accel-ppp-default	2013-12-06 13:52:09.192008730 +0400
+@@ -4,7 +4,7 @@
+ START="no"
+ 
+ # Location of the configuration file
+-CONFFILE="/etc/accel-ppp.conf"
++CONFFILE="/etc/accel-ppp/accel-ppp.conf"
+ 
+ # If you want to override options accel-pppd is run with,
+ # you can do it here.

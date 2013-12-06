@@ -1,3 +1,10 @@
+accel-ppp (1.7.3-0ubuntu1~0alphacom3) precise; urgency=low
+
+  * Upstream release 1.7.3+ git da7bb06e (with Alphacom custom patches)
+  * Improved init script. Now default is to not start unless configured.
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Tue, 06 Dec 2013 13:06:00 +0400
+
 accel-ppp (1.7.3-0ubuntu1~0alphacom2) oneiric; urgency=low
 
   * Upstream release 1.7.3 (with Alphacom custom patches)

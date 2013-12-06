@@ -1,14 +1,15 @@
---- accel-ppp/accel-pppd/CMakeLists.txt	2012-05-28 22:41:24.823797460 +0400
-+++ accel-ppp/accel-pppd/CMakeLists.txt	2012-05-28 22:41:40.315797371 +0400
-@@ -88,11 +88,3 @@
+--- accel-ppp/accel-pppd/CMakeLists.txt	2013-12-06 13:39:48.926380316 +0400
++++ accel-ppp/accel-pppd/CMakeLists.txt	2013-12-06 13:39:57.558166096 +0400
+@@ -98,12 +98,3 @@
+ )
  
  INSTALL(FILES accel-ppp.conf.5 DESTINATION share/man/man5)
- 
--IF (NOT DEFINED CPACK_TYPE)
--	INSTALL(FILES accel-ppp.conf DESTINATION /etc RENAME accel-ppp.conf.dist)
 -
--	INSTALL(CODE "EXECUTE_PROCESS(COMMAND mkdir -p /var/log/accel-ppp)")
--	INSTALL(CODE "EXECUTE_PROCESS(COMMAND mkdir -p /var/run/accel-ppp)")
--	INSTALL(CODE "EXECUTE_PROCESS(COMMAND 'echo 0 > /var/run/accel-ppp/seq')")
+-IF (NOT DEFINED CPACK_TYPE)
+-	INSTALL(FILES accel-ppp.conf DESTINATION ${CMAKE_FIND_ROOT_PATH}/etc RENAME accel-ppp.conf.dist)
+-
+-	INSTALL(CODE "EXECUTE_PROCESS(COMMAND mkdir -p ${CMAKE_FIND_ROOT_PATH}/var/log/accel-ppp)")
+-	INSTALL(CODE "EXECUTE_PROCESS(COMMAND mkdir -p ${CMAKE_FIND_ROOT_PATH}/var/run/accel-ppp)")
+-	INSTALL(CODE "EXECUTE_PROCESS(COMMAND 'echo 0 > ${CMAKE_FIND_ROOT_PATH}/var/run/accel-ppp/seq')")
 -ENDIF (NOT DEFINED CPACK_TYPE)
 -
