@@ -13,7 +13,7 @@ override_dh_installdocs:
 
 override_dh_auto_configure:
 	chmod +x cmake/gcc_debug_fix.sh.in
-	dh_auto_configure
+	dh_auto_configure -- -DRADIUS=TRUE -DNETSNMP=TRUE
 
 %:
 	dh  $@
