@@ -14,7 +14,6 @@
 #define ATTR_TYPE_STRING  5
 
 #define L2TP_MAX_PACKET_SIZE 65536
-#define L2TP_MAX_TID 65534
 
 #define L2TP_V2_PROTOCOL_VERSION ( 1 << 8 | 0 )
 
@@ -65,6 +64,7 @@ struct l2tp_attr_t
 struct l2tp_packet_t
 {
 	struct list_head entry;
+	struct list_head sess_entry;
 	struct sockaddr_in addr;
 	struct l2tp_hdr_t hdr;
 	struct list_head attrs;
@@ -76,6 +76,11 @@ struct l2tp_packet_t
 
 extern int conf_verbose;
 extern int conf_avp_permissive;
+
+static inline int l2tp_packet_is_ZLB(const struct l2tp_packet_t *pack)
+{
+	return list_empty(&pack->attrs);
+}
 
 struct l2tp_dict_attr_t *l2tp_dict_find_attr_by_name(const char *name);
 struct l2tp_dict_attr_t *l2tp_dict_find_attr_by_id(int id);

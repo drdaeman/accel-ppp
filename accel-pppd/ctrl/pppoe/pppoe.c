@@ -927,6 +927,17 @@ static void pppoe_recv_PADR(struct pppoe_serv_t *serv, uint8_t *pack, int size)
 	
 	for (n = 0; n < ntohs(hdr->length); n += sizeof(*tag) + ntohs(tag->tag_len)) {
 		tag = (struct pppoe_tag *)(pack + ETH_HLEN + sizeof(*hdr) + n);
+
+		if (n + sizeof(*tag) > ntohs(hdr->length)) {
+			if (conf_verbose)
+				log_warn("pppoe: discard PADR packet (truncated tag)\n");
+			return;
+		}
+		if (n + sizeof(*tag) + ntohs(tag->tag_len) > ntohs(hdr->length)) {
+			if (conf_verbose)
+				log_warn("pppoe: discard PADR packet (invalid tag length)\n");
+			return;
+		}
 		switch (ntohs(tag->tag_type)) {
 			case TAG_END_OF_LIST:
 				break;
@@ -1504,8 +1515,12 @@ static void pppoe_init(void)
 {
 	struct conf_sect_t *s = conf_get_section("pppoe");
 	struct conf_option_t *opt;
+	int fd;
 
-	if (system("modprobe -q pppoe"))
+	fd = socket(AF_PPPOX, SOCK_DGRAM, PX_PROTO_OE);
+	if (fd >= 0)
+		close(fd);
+	else if (system("modprobe -q pppoe"))
 		log_warn("failed to load pppoe kernel module\n");
 
 	conn_pool = mempool_create(sizeof(struct pppoe_conn_t));

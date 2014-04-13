@@ -477,11 +477,29 @@ This name will be sent to clients in Host-Name attribute.
 .BI "hello-interval=" n
 Specifies interval (in seconds) to send Hello control message. Its used for keep alive connection. If peer will not respond to Hello connection will be terminated.
 .TP
+.BI "recv-window=" n
+Set the size of the local receive window. Only received messages whose sequence
+number is in the range [last-Nr + 1, last-Nr + recv-window] are accepted
+(where last-Nr is the sequence number of the last acknowledged message).
+Minimum value is 1, maximum is 32768, default is 16.
+.TP
 .BI "timeout=" n
 Specifies timeout (in seconds) to wait peer completes tunnel and session negotiation.
 .TP
 .BI "rtimeout=" n
 Specifies timeout (in seconds) to wait message acknowledge, if elapsed message retransmition will be performed.
+Timeout is multiplied by two after each retransmission. So if
+.BR rtimeout " is set to 1, first retransmission will occur after one second,"
+second retransmission two seconds later, third one four seconds later, and so
+on, until a reply is received or the
+.BR retransmit " value is reached. Default value is 1."
+.TP
+.BI "rtimeout-cap=" n
+Set the maximum interval between retransmissions. The exponential backoff
+.RB "interval used by " rtimeout " will never grow above " rtimeout-cap .
+.BR rtimeout-cap " must be higher than " rtimeout " and, according to RFC 2661,
+must be no less than 8 (though accel-ppp doesn't enforce this rule).
+Default value is 16.
 .TP
 .BI "retransmit=" n
 Specifies maximum number of message retransmission, if exceeds connection will be terminated.
@@ -722,20 +740,20 @@ Specifies single IP address to be used as local address of ppp interfaces.
 .BI "gw=" range
 Specifies range of local address of ppp interfaces if form:
 .br
-.B x.x.x.x/mask[,pool_name]
+.B x.x.x.x/mask[,name=pool_name]
 (for example 10.0.0.0/8)
 .br
-.B x.x.x.x-y[,pool_name]
+.B x.x.x.x-y[,name=pool_name]
 (for example 10.0.0.1-254)
 .TP
 .BI "tunnel=" range
 Specifies range of remote address of ppp interfaces if form:
 .br
-.B x.x.x.x/mask[,pool_name]
+.B x.x.x.x/mask[,name=pool_name]
 .br
-.B x.x.x.x-y[,pool_name]
+.B x.x.x.x-y[,name=pool_name]
 .TP
-.BI "x.x.x.x/mask[,pool_name] or x.x.x.x-y[,pool_name]"
+.BI "x.x.x.x/mask[,name=pool_name] or x.x.x.x-y[,name=pool_name]"
 Also specifies range of remote address of ppp interfaces.
 .TP
 .BI "attr=" attribute

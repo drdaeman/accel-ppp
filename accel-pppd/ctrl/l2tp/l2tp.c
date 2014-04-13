@@ -37,28 +37,54 @@
 #define SOL_PPPOL2TP 273
 #endif
 
-#define STATE_WAIT_SCCRP 1
-#define STATE_WAIT_SCCCN 2
-#define STATE_WAIT_ICRP  3
-#define STATE_WAIT_ICCN  4
-#define STATE_WAIT_OCRP  5
-#define STATE_WAIT_OCCN  6
-#define STATE_ESTB       7
-#define STATE_PPP        8
+#define STATE_INIT       1
+#define STATE_WAIT_SCCRP 2
+#define STATE_WAIT_SCCCN 3
+#define STATE_WAIT_ICRP  4
+#define STATE_WAIT_ICCN  5
+#define STATE_WAIT_OCRP  6
+#define STATE_WAIT_OCCN  7
+#define STATE_ESTB       8
 #define STATE_FIN        9
-#define STATE_CLOSE      0
+#define STATE_FIN_WAIT   10
+#define STATE_CLOSE      11
 
+#define APSTATE_INIT      1
+#define APSTATE_STARTING  2
+#define APSTATE_STARTED   3
+#define APSTATE_FINISHING 4
+
+/* Default size of receive window for peer not sending the
+ * Receive Window Size AVP (defined in RFC 2661 section 4.4.3).
+ */
+#define DEFAULT_PEER_RECV_WINDOW_SIZE 4
+
+/* Maximum value of the Receive Window Size AVP.
+ * The Ns field value of received messages must lie in the range of the tunnel
+ * Nr field and the following 32768 values inclusive. Other values mean that
+ * the message is a duplicate (see comment in nsnr_cmp()).
+ * So it wouldn't make sense to have a receive window larger than 32768, as
+ * messages that could fill the 32768+ slots would be rejected as duplicates.
+ */
+#define RECV_WINDOW_SIZE_MAX 32768
+
+#define DEFAULT_RECV_WINDOW 16
 #define DEFAULT_PPP_MAX_MTU 1420
+#define DEFAULT_RTIMEOUT 1
+#define DEFAULT_RTIMEOUT_CAP 16
+#define DEFAULT_RETRANSMIT 5
 
 int conf_verbose = 0;
 int conf_hide_avps = 0;
 int conf_avp_permissive = 0;
+static uint16_t conf_recv_window = DEFAULT_RECV_WINDOW;
 static int conf_ppp_max_mtu = DEFAULT_PPP_MAX_MTU;
 static int conf_port = L2TP_PORT;
 static int conf_ephemeral_ports = 0;
 static int conf_timeout = 60;
-static int conf_rtimeout = 5;
-static int conf_retransmit = 5;
+static int conf_rtimeout = DEFAULT_RTIMEOUT;
+static int conf_rtimeout_cap = DEFAULT_RTIMEOUT_CAP;
+static int conf_retransmit = DEFAULT_RETRANSMIT;
 static int conf_hello_interval = 60;
 static int conf_dir300_quirk = 0;
 static const char *conf_host_name = "accel-ppp";
@@ -69,8 +95,17 @@ static int conf_dataseq = L2TP_DATASEQ_ALLOW;
 static int conf_reorder_timeout = 0;
 static const char *conf_ip_pool;
 
+static unsigned int stat_conn_starting;
+static unsigned int stat_conn_active;
+static unsigned int stat_conn_finishing;
+
+static unsigned int stat_sess_starting;
+static unsigned int stat_sess_active;
+static unsigned int stat_sess_finishing;
+
 static unsigned int stat_active;
 static unsigned int stat_starting;
+static unsigned int stat_finishing;
 
 struct l2tp_serv_t
 {
@@ -85,6 +120,7 @@ struct l2tp_sess_t
 	uint16_t sid;
 	uint16_t peer_sid;
 
+	unsigned int ref_count;
 	int state1;
 	uint16_t lns_mode:1;
 	uint16_t hide_avps:1;
@@ -92,19 +128,28 @@ struct l2tp_sess_t
 	uint16_t recv_seq:1;
 	int reorder_timeout;
 
-	struct triton_context_t sctx;
 	struct triton_timer_t timeout_timer;
+	struct list_head send_queue;
+
+	pthread_mutex_t apses_lock;
+	struct triton_context_t apses_ctx;
+	int apses_state;
 	struct ap_ctrl ctrl;
 	struct ppp_t ppp;
 };
 
 struct l2tp_conn_t
 {
+	pthread_mutex_t ctx_lock;
 	struct triton_context_t ctx;
+
 	struct triton_md_handler_t hnd;
 	struct triton_timer_t timeout_timer;
 	struct triton_timer_t rtimeout_timer;
 	struct triton_timer_t hello_timer;
+	int rtimeout;
+	int rtimeout_cap;
+	int max_retransmit;
 
 	struct sockaddr_in peer_addr;
 	struct sockaddr_in host_addr;
@@ -116,11 +161,21 @@ struct l2tp_conn_t
 	uint16_t port_set:1;
 	uint16_t challenge_len;
 	uint8_t *challenge;
+	size_t secret_len;
+	char *secret;
 
 	int retransmit;
 	uint16_t Ns, Nr;
+	uint16_t peer_Nr;
 	struct list_head send_queue;
+	struct list_head rtms_queue;
+	unsigned int send_queue_len;
+	struct l2tp_packet_t **recv_queue;
+	uint16_t recv_queue_sz;
+	uint16_t recv_queue_offt;
+	uint16_t peer_rcv_wnd_sz;
 
+	unsigned int ref_count;
 	int state;
 	void *sessions;
 	unsigned int sess_count;
@@ -128,20 +183,17 @@ struct l2tp_conn_t
 
 static pthread_mutex_t l2tp_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct l2tp_conn_t **l2tp_conn;
-static uint16_t l2tp_tid;
 
 static mempool_t l2tp_conn_pool;
 static mempool_t l2tp_sess_pool;
 
-static void l2tp_timeout(struct triton_timer_t *t);
+static void l2tp_tunnel_timeout(struct triton_timer_t *t);
 static void l2tp_rtimeout(struct triton_timer_t *t);
 static void l2tp_send_HELLO(struct triton_timer_t *t);
-static int l2tp_tunnel_send(struct l2tp_conn_t *conn,
-			    struct l2tp_packet_t *pack);
-static int l2tp_session_send(struct l2tp_sess_t *sess,
-			     struct l2tp_packet_t *pack);
 static int l2tp_conn_read(struct triton_md_handler_t *);
-static void l2tp_tunnel_session_freed(void *data);
+static void l2tp_session_free(struct l2tp_sess_t *sess);
+static void l2tp_tunnel_free(struct l2tp_conn_t *conn);
+static void apses_stop(void *data);
 
 
 #define log_tunnel(log_func, conn, fmt, ...)				\
@@ -206,11 +258,6 @@ static inline struct l2tp_conn_t *l2tp_tunnel_self(void)
 	return container_of(triton_context_self(), struct l2tp_conn_t, ctx);
 }
 
-static inline struct l2tp_sess_t *l2tp_session_self(void)
-{
-	return container_of(triton_context_self(), struct l2tp_sess_t, sctx);
-}
-
 static int sess_cmp(const void *a, const void *b)
 {
 	const struct l2tp_sess_t *sess_a = a;
@@ -238,7 +285,7 @@ static int l2tp_tunnel_genchall(uint16_t chall_len,
 	int err;
 
 	if (chall_len == 0
-	    || conf_secret == NULL || conf_secret_len == 0) {
+	    || conn->secret == NULL || conn->secret_len == 0) {
 		if (conn->challenge) {
 			_free(conn->challenge);
 			conn->challenge = NULL;
@@ -306,7 +353,7 @@ static int l2tp_tunnel_storechall(struct l2tp_conn_t *conn,
 		return 0;
 	}
 
-	if (conf_secret == NULL || conf_secret_len == 0) {
+	if (conn->secret == NULL || conn->secret_len == 0) {
 		log_tunnel(log_error, conn, "authentication required by peer,"
 			   " but no secret has been set for this tunnel\n");
 		goto err;
@@ -344,21 +391,21 @@ static int l2tp_tunnel_genchallresp(uint8_t msgident,
 	uint8_t challresp[MD5_DIGEST_LENGTH];
 
 	if (conn->challenge == NULL) {
-		if (conf_secret && conf_secret_len > 0) {
+		if (conn->secret && conn->secret_len > 0) {
 			log_tunnel(log_warn, conn,
 				   "no Challenge sent by peer\n");
 		}
 		return 0;
 	}
 
-	if (conf_secret == NULL || conf_secret_len == 0) {
+	if (conn->secret == NULL || conn->secret_len == 0) {
 		log_tunnel(log_error, conn,
 			   "impossible to generate Challenge Response:"
 			   " no secret set for this tunnel\n");
 		return -1;
 	}
 
-	comp_chap_md5(challresp, msgident, conf_secret, conf_secret_len,
+	comp_chap_md5(challresp, msgident, conn->secret, conn->secret_len,
 		      conn->challenge, conn->challenge_len);
 	if (l2tp_packet_add_octets(pack, Challenge_Response, challresp,
 				   MD5_DIGEST_LENGTH, 1) < 0) {
@@ -377,7 +424,7 @@ static int l2tp_tunnel_checkchallresp(uint8_t msgident,
 {
 	uint8_t challref[MD5_DIGEST_LENGTH];
 
-	if (conf_secret == NULL || conf_secret_len == 0) {
+	if (conn->secret == NULL || conn->secret_len == 0) {
 		if (challresp) {
 			log_tunnel(log_warn, conn,
 				   "discarding unexpected Challenge Response"
@@ -404,7 +451,7 @@ static int l2tp_tunnel_checkchallresp(uint8_t msgident,
 		return -1;
 	}
 
-	comp_chap_md5(challref, msgident, conf_secret, conf_secret_len,
+	comp_chap_md5(challref, msgident, conn->secret, conn->secret_len,
 		      conn->challenge, conn->challenge_len);
 	if (memcmp(challref, challresp->val.octets, MD5_DIGEST_LENGTH) != 0) {
 		log_tunnel(log_error, conn, "impossible to authenticate peer:"
@@ -416,18 +463,265 @@ static int l2tp_tunnel_checkchallresp(uint8_t msgident,
 	return 0;
 }
 
+static void l2tp_tunnel_clear_recvqueue(struct l2tp_conn_t *conn)
+{
+	struct l2tp_packet_t *pack;
+	uint16_t id;
+
+	for (id = 0; id < conn->recv_queue_sz; ++id) {
+		pack = conn->recv_queue[id];
+		if (pack) {
+			l2tp_packet_free(pack);
+			conn->recv_queue[id] = NULL;
+		}
+	}
+	conn->recv_queue_offt = 0;
+}
+
+static void l2tp_tunnel_clear_sendqueue(struct l2tp_conn_t *conn)
+{
+	struct l2tp_packet_t *pack;
+
+	while (!list_empty(&conn->send_queue)) {
+		pack = list_first_entry(&conn->send_queue, typeof(*pack),
+					entry);
+		if (pack->sess_entry.next)
+			list_del(&pack->sess_entry);
+		list_del(&pack->entry);
+		l2tp_packet_free(pack);
+	}
+	conn->send_queue_len = 0;
+}
+
+static void l2tp_session_clear_sendqueue(struct l2tp_sess_t *sess)
+{
+	struct l2tp_packet_t *pack;
+
+	while (!list_empty(&sess->send_queue)) {
+		pack = list_first_entry(&sess->send_queue, typeof(*pack),
+					sess_entry);
+		list_del(&pack->sess_entry);
+		list_del(&pack->entry);
+		--sess->paren_conn->send_queue_len;
+		l2tp_packet_free(pack);
+	}
+}
+
+static int __l2tp_tunnel_send(const struct l2tp_conn_t *conn,
+			      struct l2tp_packet_t *pack)
+{
+	const struct l2tp_attr_t *msg_type;
+	void (*log_func)(const char *fmt, ...);
+
+	pack->hdr.Nr = htons(conn->Nr);
+
+	if (conf_verbose) {
+		if (l2tp_packet_is_ZLB(pack)) {
+			log_func = log_debug;
+		} else {
+			msg_type = list_first_entry(&pack->attrs,
+						    typeof(*msg_type), entry);
+			if (msg_type->val.uint16 == Message_Type_Hello)
+				log_func = log_debug;
+			else
+				log_func = log_info2;
+		}
+		log_tunnel(log_func, conn, "send ");
+		l2tp_packet_print(pack, log_func);
+	}
+
+	return l2tp_packet_send(conn->hnd.fd, pack);
+}
+
+/* Drop acknowledged packets from tunnel's retransmission queue */
+static int l2tp_tunnel_clean_rtmsqueue(struct l2tp_conn_t *conn)
+{
+	struct l2tp_packet_t *pack;
+	unsigned int pkt_freed = 0;
+
+	while (!list_empty(&conn->rtms_queue)) {
+		pack = list_first_entry(&conn->rtms_queue, typeof(*pack),
+					entry);
+		if (nsnr_cmp(ntohs(pack->hdr.Ns), conn->peer_Nr) >= 0)
+			break;
+
+		list_del(&pack->entry);
+		l2tp_packet_free(pack);
+		++pkt_freed;
+	}
+
+	log_tunnel(log_debug, conn, "%u message%s acked by peer\n", pkt_freed,
+		   pkt_freed > 1 ? "s" : "");
+
+	if (pkt_freed == 0)
+		return 0;
+
+	/* Oldest message from retransmission queue has been acknowledged,
+	 * reset retransmission counter and timer.
+	 */
+	conn->retransmit = 0;
+
+	/* Stop timer if retransmission queue is empty */
+	if (list_empty(&conn->rtms_queue)) {
+		if (conn->rtimeout_timer.tpd)
+			triton_timer_del(&conn->rtimeout_timer);
+
+		return 0;
+	}
+
+	/* Some messages haven't been acknowledged yet, restart timer */
+	conn->rtimeout_timer.period = conn->rtimeout;
+	if (conn->rtimeout_timer.tpd) {
+		if (triton_timer_mod(&conn->rtimeout_timer, 0) < 0) {
+			log_tunnel(log_error, conn,
+				   "impossible to clean retransmission queue:"
+				   " updating retransmission timer failed\n");
+
+			return -1;
+		}
+	} else {
+		if (triton_timer_add(&conn->ctx,
+				     &conn->rtimeout_timer, 0) < 0) {
+			log_tunnel(log_error, conn,
+				   "impossible to clean retransmission queue:"
+				   " starting retransmission timer failed\n");
+
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int l2tp_tunnel_push_sendqueue(struct l2tp_conn_t *conn)
+{
+	struct l2tp_packet_t *pack;
+	uint16_t Nr_max = conn->peer_Nr + conn->peer_rcv_wnd_sz;
+	unsigned int pkt_sent = 0;
+
+	while (!list_empty(&conn->send_queue)) {
+		pack = list_first_entry(&conn->send_queue, typeof(*pack),
+					entry);
+		if (nsnr_cmp(conn->Ns, Nr_max) >= 0)
+			break;
+
+		pack->hdr.Ns = htons(conn->Ns);
+
+		if (__l2tp_tunnel_send(conn, pack) < 0) {
+			log_tunnel(log_error, conn,
+				   "impossible to process the send queue:"
+				   " sending packet %hu failed\n", conn->Ns);
+
+			return -1;
+		}
+
+		if (pack->sess_entry.next) {
+			list_del(&pack->sess_entry);
+			pack->sess_entry.next = NULL;
+			pack->sess_entry.prev = NULL;
+		}
+		list_move_tail(&pack->entry, &conn->rtms_queue);
+		--conn->send_queue_len;
+		++conn->Ns;
+		++pkt_sent;
+	}
+
+	log_tunnel(log_debug, conn, "%u message%s sent from send queue\n",
+		   pkt_sent, pkt_sent > 1 ? "s" : "");
+
+	if (pkt_sent == 0) {
+		if (!list_empty(&conn->send_queue))
+			log_tunnel(log_info2, conn,
+				   "no message sent while processing the send queue (%u outstanding messages):"
+				   " peer's receive window is full (%hu messages)\n",
+				   conn->send_queue_len, conn->peer_rcv_wnd_sz);
+
+		return 0;
+	}
+
+	/* At least one message sent, restart retransmission timer if necessary
+	 * (timer may be stopped, e.g. because there was no message left in the
+	 * retransmission queue).
+	 */
+	if (conn->rtimeout_timer.tpd == NULL) {
+		conn->rtimeout_timer.period = conn->rtimeout;
+		if (triton_timer_add(&conn->ctx,
+				     &conn->rtimeout_timer, 0) < 0) {
+			log_tunnel(log_error, conn,
+				   "impossible to process the send queue:"
+				   " setting retransmission timer failed\n");
+
+			return -1;
+		}
+	}
+
+	return 1;
+}
+
+static int l2tp_tunnel_send(struct l2tp_conn_t *conn,
+			    struct l2tp_packet_t *pack)
+{
+	if (conn->state == STATE_FIN || conn->state == STATE_FIN_WAIT ||
+	    conn->state == STATE_CLOSE) {
+		log_tunnel(log_info2, conn,
+			   "discarding outgoing message, tunnel is closing\n");
+		l2tp_packet_free(pack);
+
+		return -1;
+	}
+
+	pack->hdr.tid = htons(conn->peer_tid);
+	list_add_tail(&pack->entry, &conn->send_queue);
+	++conn->send_queue_len;
+
+	return 0;
+}
+
+static int l2tp_session_send(struct l2tp_sess_t *sess,
+			     struct l2tp_packet_t *pack)
+{
+	if (sess->state1 == STATE_CLOSE) {
+		log_session(log_info2, sess,
+			    "discarding outgoing message,"
+			    " session is closing\n");
+		l2tp_packet_free(pack);
+
+		return -1;
+	}
+
+	pack->hdr.sid = htons(sess->peer_sid);
+
+	if (l2tp_tunnel_send(sess->paren_conn, pack) < 0)
+		return -1;
+
+	list_add_tail(&pack->sess_entry, &sess->send_queue);
+
+	return 0;
+}
+
+static int l2tp_session_try_send(struct l2tp_sess_t *sess,
+				 struct l2tp_packet_t *pack)
+{
+	if (sess->paren_conn->send_queue_len >= sess->paren_conn->peer_rcv_wnd_sz)
+		return -1;
+
+	l2tp_session_send(sess, pack);
+
+	return 0;
+}
+
 static int l2tp_send_StopCCN(struct l2tp_conn_t *conn,
 			     uint16_t res, uint16_t err)
 {
 	struct l2tp_packet_t *pack = NULL;
 	struct l2tp_avp_result_code rc = {htons(res), htons(err)};
 
-	log_tunnel(log_info2, conn, "sending StopCCN (res: %hu, err:%hu)\n",
+	log_tunnel(log_info2, conn, "sending StopCCN (res: %hu, err: %hu)\n",
 		   res, err);
 
 	pack = l2tp_packet_alloc(2, Message_Type_Stop_Ctrl_Conn_Notify,
 				 &conn->peer_addr, conn->hide_avps,
-				 conf_secret, conf_secret_len);
+				 conn->secret, conn->secret_len);
 	if (pack == NULL) {
 		log_tunnel(log_error, conn, "impossible to send StopCCN:"
 			   " packet allocation failed\n");
@@ -446,11 +740,7 @@ static int l2tp_send_StopCCN(struct l2tp_conn_t *conn,
 		goto out_err;
 	}
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
-		log_tunnel(log_error, conn, "impossible to send StopCCN:"
-			   " sending packet failed\n");
-		return -1;
-	}
+	l2tp_tunnel_send(conn, pack);
 
 	return 0;
 
@@ -470,7 +760,8 @@ static int l2tp_send_CDN(struct l2tp_sess_t *sess, uint16_t res, uint16_t err)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Call_Disconnect_Notify,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (pack == NULL) {
 		log_session(log_error, sess, "impossible to send CDN:"
 			    " packet allocation failed\n");
@@ -489,11 +780,7 @@ static int l2tp_send_CDN(struct l2tp_sess_t *sess, uint16_t res, uint16_t err)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
-		log_session(log_error, sess, "impossible to send CDN:"
-			    " sending packet failed\n");
-		return -1;
-	}
+	l2tp_session_send(sess, pack);
 
 	return 0;
 
@@ -515,7 +802,7 @@ static int l2tp_tunnel_send_CDN(uint16_t sid, uint16_t peer_sid,
 
 	pack = l2tp_packet_alloc(2, Message_Type_Call_Disconnect_Notify,
 				 &conn->peer_addr, conn->hide_avps,
-				 conf_secret, conf_secret_len);
+				 conn->secret, conn->secret_len);
 	if (pack == NULL) {
 		log_tunnel(log_error, conn, "impossible to send CDN:"
 			   " packet allocation failed\n");
@@ -535,11 +822,7 @@ static int l2tp_tunnel_send_CDN(uint16_t sid, uint16_t peer_sid,
 
 	pack->hdr.sid = htons(peer_sid);
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
-		log_tunnel(log_error, conn, "impossible to send CDN:"
-			   " sending packet failed\n");
-		return -1;
-	}
+	l2tp_tunnel_send(conn, pack);
 
 	return 0;
 
@@ -549,51 +832,130 @@ out_err:
 	return -1;
 }
 
-static void l2tp_tunnel_disconnect(struct l2tp_conn_t *conn, int res, int err)
+static void l2tp_tunnel_free_sessions(struct l2tp_conn_t *conn)
 {
-	if (l2tp_send_StopCCN(conn, res, err) < 0)
-		log_tunnel(log_error, conn,
-			   "impossible to notify peer of tunnel disconnection,"
-			   " disconnecting anyway\n");
+	void *sessions = conn->sessions;
 
-	conn->state = STATE_FIN;
+	conn->sessions = NULL;
+	tdestroy(sessions, (__free_fn_t)l2tp_session_free);
+	/* Let l2tp_session_free() handle the session counter and
+	 * the reference held by the tunnel.
+	 */
 }
 
-static void __l2tp_session_free(void *data)
+static int l2tp_tunnel_disconnect(struct l2tp_conn_t *conn,
+				  uint16_t res, uint16_t err)
 {
-	struct l2tp_sess_t *sess = data;
-
-	switch (sess->state1) {
-	case STATE_PPP:
-		sess->state1 = STATE_CLOSE;
-		ap_session_terminate(&sess->ppp.ses,
-				     TERM_USER_REQUEST, 1);
-		/* No cleanup here, "sess" must remain a valid session
-		   pointer (even if it no l2tp_conn_t points to it anymore).
-		   This is because the above call to ap_session_terminate()
-		   ends up in calling the l2tp_ppp_finished() callback,
-		   which expects a valid session pointer. It is then the
-		   responsibility of l2tp_ppp_finished() to eventually
-		   cleanup the session structure by calling again
-		   __l2tp_session_free(). */
-		return;
-	case STATE_WAIT_ICCN:
-	case STATE_WAIT_OCRP:
-	case STATE_WAIT_OCCN:
-	case STATE_ESTB:
-		__sync_sub_and_fetch(&stat_starting, 1);
+	switch (conn->state) {
+	case STATE_INIT:
+	case STATE_WAIT_SCCRP:
+	case STATE_WAIT_SCCCN:
+		__sync_sub_and_fetch(&stat_conn_starting, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
 		break;
+	case STATE_ESTB:
+		__sync_sub_and_fetch(&stat_conn_active, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
+		break;
+	case STATE_FIN:
+	case STATE_FIN_WAIT:
+	case STATE_CLOSE:
+		return 0;
+	default:
+		log_tunnel(log_error, conn,
+			   "impossible to disconnect tunnel:"
+			   " invalid state %i\n",
+			   conn->state);
+		return 0;
 	}
 
-	if (sess->state1 == STATE_ESTB || sess->state1 == STATE_CLOSE)
-		/* Don't send event if session wasn't fully established */
-		triton_event_fire(EV_CTRL_FINISHED, &sess->ppp.ses);
+	/* Discard unsent messages so that StopCCN will be the only one in the
+	 * send queue (to minimise delay in case of congestion).
+	 */
+	l2tp_tunnel_clear_sendqueue(conn);
 
-	if (sess->timeout_timer.tpd)
-		triton_timer_del(&sess->timeout_timer);
-	triton_context_unregister(&sess->sctx);
+	if (l2tp_send_StopCCN(conn, res, err) < 0) {
+		log_tunnel(log_error, conn,
+			   "impossible to notify peer of tunnel disconnection:"
+			   " sending StopCCN failed,"
+			   " deleting tunnel anyway\n");
 
-	if (sess->ppp.fd != -1)
+		conn->state = STATE_FIN;
+		l2tp_tunnel_free(conn);
+
+		return -1;
+	}
+
+	conn->state = STATE_FIN;
+
+	if (conn->timeout_timer.tpd)
+		triton_timer_del(&conn->timeout_timer);
+	if (conn->hello_timer.tpd)
+		triton_timer_del(&conn->hello_timer);
+
+	if (conn->sessions)
+		l2tp_tunnel_free_sessions(conn);
+
+	return 0;
+}
+
+static int l2tp_tunnel_disconnect_push(struct l2tp_conn_t *conn,
+				       uint16_t res, uint16_t err)
+{
+	if (l2tp_tunnel_disconnect(conn, res, err) < 0)
+		return -1;
+
+	if (l2tp_tunnel_push_sendqueue(conn) < 0) {
+		log_tunnel(log_error, conn,
+			   "impossible to notify peer of tunnel disconnection:"
+			   " transmitting messages from send queue failed,"
+			   " deleting tunnel anyway\n");
+		l2tp_tunnel_free(conn);
+
+		return -1;
+	}
+
+	return 0;
+}
+
+static void __tunnel_destroy(struct l2tp_conn_t *conn)
+{
+	pthread_mutex_destroy(&conn->ctx_lock);
+
+	if (conn->hnd.fd >= 0)
+		close(conn->hnd.fd);
+	if (conn->challenge)
+		_free(conn->challenge);
+	if (conn->secret)
+		_free(conn->secret);
+	if (conn->recv_queue)
+		_free(conn->recv_queue);
+
+	log_tunnel(log_info2, conn, "tunnel destroyed\n");
+
+	mempool_free(conn);
+
+	__sync_sub_and_fetch(&stat_conn_finishing, 1);
+}
+
+static void tunnel_put(struct l2tp_conn_t *conn)
+{
+	if (__sync_sub_and_fetch(&conn->ref_count, 1) == 0)
+		__tunnel_destroy(conn);
+}
+
+static void tunnel_hold(struct l2tp_conn_t *conn)
+{
+	__sync_add_and_fetch(&conn->ref_count, 1);
+}
+
+static void __session_destroy(struct l2tp_sess_t *sess)
+{
+	struct l2tp_conn_t *conn = sess->paren_conn;
+
+	pthread_mutex_destroy(&sess->apses_lock);
+
+	if (sess->ppp.fd >= 0)
 		close(sess->ppp.fd);
 	if (sess->ppp.ses.chan_name)
 		_free(sess->ppp.ses.chan_name);
@@ -602,198 +964,432 @@ static void __l2tp_session_free(void *data)
 	if (sess->ctrl.called_station_id)
 		_free(sess->ctrl.called_station_id);
 
-	if (triton_context_call(&sess->paren_conn->ctx,
-				l2tp_tunnel_session_freed, NULL) < 0)
-		log_session(log_error, sess,
-			    "impossible to notify parent tunnel that"
-			    " session has been freed\n");
-
-	log_session(log_info2, sess, "destroyed\n");
+	log_session(log_info2, sess, "session destroyed\n");
 
 	mempool_free(sess);
+
+	__sync_sub_and_fetch(&stat_sess_finishing, 1);
+
+	/* Now that the session is fully destroyed,
+	 * drop the reference to the tunnel.
+	 */
+	tunnel_put(conn);
 }
 
-static void __l2tp_tunnel_free_session(void *data)
+static void session_put(struct l2tp_sess_t *sess)
 {
-	struct l2tp_sess_t *sess = data;
-
-	if (triton_context_call(&sess->sctx, __l2tp_session_free, sess) < 0)
-		log_tunnel(log_error, l2tp_tunnel_self(),
-			   "impossible to free session %hu/%hu:"
-			   " call to child session failed\n",
-			   sess->sid, sess->peer_sid);
+	if (__sync_sub_and_fetch(&sess->ref_count, 1) == 0)
+		__session_destroy(sess);
 }
 
-static void l2tp_tunnel_free_session(void *sess)
+static void session_hold(struct l2tp_sess_t *sess)
 {
-	struct l2tp_conn_t *conn = l2tp_tunnel_self();
-
-	tdelete(sess, &conn->sessions, sess_cmp);
-	__l2tp_tunnel_free_session(sess);
+	__sync_add_and_fetch(&sess->ref_count, 1);
 }
 
-static void l2tp_tunnel_free_sessionid(void *data)
+static void l2tp_session_free(struct l2tp_sess_t *sess)
 {
-	uint16_t sid = (intptr_t)data;
-	struct l2tp_conn_t *conn = l2tp_tunnel_self();
-	struct l2tp_sess_t *sess = l2tp_tunnel_get_session(conn, sid);
+	struct l2tp_packet_t *pack;
+	intptr_t cause = TERM_NAS_REQUEST;
+	int res = 1;
 
-	if (sess)
-		l2tp_tunnel_free_session(sess);
-	else
-		log_tunnel(log_info2, conn, "avoid freeing session %hu:"
-			   " session already removed from tunnel\n", sid);
-}
+	switch (sess->state1) {
+	case STATE_INIT:
+	case STATE_WAIT_ICRP:
+	case STATE_WAIT_ICCN:
+	case STATE_WAIT_OCRP:
+	case STATE_WAIT_OCCN:
+		log_session(log_info2, sess, "deleting session\n");
 
-static int l2tp_session_free(struct l2tp_sess_t *sess)
-{
-	intptr_t sid = sess->sid;
+		__sync_sub_and_fetch(&stat_sess_starting, 1);
+		__sync_add_and_fetch(&stat_sess_finishing, 1);
+		break;
+	case STATE_ESTB:
+		log_session(log_info2, sess, "deleting session\n");
 
-	if (triton_context_call(&sess->paren_conn->ctx,
-				l2tp_tunnel_free_sessionid, (void *)sid) < 0) {
-		log_session(log_error, sess, "impossible to free session:"
-			    " call to parent tunnel failed\n");
-		return -1;
+		triton_event_fire(EV_CTRL_FINISHED, &sess->ppp.ses);
+		__sync_sub_and_fetch(&stat_sess_active, 1);
+		__sync_add_and_fetch(&stat_sess_finishing, 1);
+
+		pthread_mutex_lock(&sess->apses_lock);
+		if (sess->apses_ctx.tpd)
+			res = triton_context_call(&sess->apses_ctx, apses_stop,
+						  (void *)cause);
+		pthread_mutex_unlock(&sess->apses_lock);
+
+		if (res < 0)
+			log_session(log_error, sess,
+				    "impossible to delete data channel:"
+				    " call to data channel context failed\n");
+		else if (res == 0)
+			log_session(log_info2, sess,
+				    "deleting data channel\n");
+		break;
+	case STATE_CLOSE:
+		/* Session already removed. Will be freed once its reference
+		 * counter drops to 0.
+		 */
+		return;
+	default:
+		log_session(log_error, sess,
+			    "impossible to delete session: invalid state %i\n",
+			    sess->state1);
+		return;
 	}
 
-	return 0;
+	sess->state1 = STATE_CLOSE;
+
+	if (sess->timeout_timer.tpd)
+		triton_timer_del(&sess->timeout_timer);
+
+	/* Packets in the send queue must not reference the session anymore.
+	 * They aren't removed from tunnel's queue because they have to be sent
+	 * even though session is getting destroyed (useless messages are
+	 * dropped from send queues before calling l2tp_session_free()).
+	 */
+	while (!list_empty(&sess->send_queue)) {
+		pack = list_first_entry(&sess->send_queue, typeof(*pack),
+					sess_entry);
+		list_del(&pack->sess_entry);
+		pack->sess_entry.next = NULL;
+		pack->sess_entry.prev = NULL;
+	}
+
+	if (sess->paren_conn->sessions) {
+		if (!tdelete(sess, &sess->paren_conn->sessions, sess_cmp)) {
+			log_session(log_error, sess,
+				    "impossible to delete session:"
+				    " session unreachable from its parent tunnel\n");
+			return;
+		}
+	}
+	/* Parent tunnel doesn't hold the session anymore. This is true even
+	 * if sess->paren_conn->sessions was NULL (which means that
+	 * l2tp_session_free() is being called by tdestroy()).
+	 */
+	session_put(sess);
+
+	if (--sess->paren_conn->sess_count == 0) {
+		switch (sess->paren_conn->state) {
+		case STATE_ESTB:
+			log_tunnel(log_info1, sess->paren_conn,
+				   "no more session, disconnecting tunnel\n");
+			l2tp_tunnel_disconnect_push(sess->paren_conn, 1, 0);
+			break;
+		case STATE_FIN:
+		case STATE_FIN_WAIT:
+		case STATE_CLOSE:
+			break;
+		default:
+			log_tunnel(log_warn, sess->paren_conn,
+				   "avoiding disconnection of empty tunnel:"
+				   " invalid state %i\n",
+				   sess->paren_conn->state);
+			break;
+		}
+	}
+
+	/* Only drop the reference the session holds to itself.
+	 * Reference to the parent tunnel will be dropped by
+	 * __session_destroy().
+	 */
+	session_put(sess);
 }
 
 static void l2tp_tunnel_free(struct l2tp_conn_t *conn)
 {
 	struct l2tp_packet_t *pack;
 
-	if (conn->state != STATE_CLOSE)
-		conn->state = STATE_CLOSE;
-
-	if (conn->sess_count != 0) {
-		/*
-		 * There are still sessions in this tunnel: remove the ones
-		 * accessible from conn->sessions then exit.
-		 *
-		 * Each removed session will make an asynchronous call to
-		 * l2tp_tunnel_session_freed(), which is responsible for
-		 * calling l2tp_tunnel_free() again once the last session
-		 * gets removed.
-		 *
-		 * There may be also sessions in this tunnel that are not
-		 * referenced in conn->sessions. This can happen when a
-		 * a session has been removed, but its cleanup function has
-		 * not yet been scheduled. Such sessions will also call
-		 * l2tp_tunnel_session_freed() after cleanup, so
-		 * l2tp_tunnel_free() will be called again once every sessions
-		 * have been cleaned up.
-		 *
-		 * This behaviour ensures that the parent tunnel of a session
-		 * remains valid during this session's lifetime.
+	switch (conn->state) {
+	case STATE_INIT:
+	case STATE_WAIT_SCCRP:
+	case STATE_WAIT_SCCCN:
+		__sync_sub_and_fetch(&stat_conn_starting, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
+		break;
+	case STATE_ESTB:
+		__sync_sub_and_fetch(&stat_conn_active, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
+		break;
+	case STATE_FIN:
+	case STATE_FIN_WAIT:
+		break;
+	case STATE_CLOSE:
+		/* Tunnel already removed. Will be freed once its reference
+		 * counter drops to 0.
 		 */
-		if (conn->sessions) {
-			tdestroy(conn->sessions, __l2tp_tunnel_free_session);
-			conn->sessions = NULL;
-		}
+		return;
+	default:
+		log_tunnel(log_error, conn,
+			   "impossible to delete tunnel: invalid state %i\n",
+			   conn->state);
 		return;
 	}
 
-	if (conn->hnd.tpd)
-		triton_md_unregister_handler(&conn->hnd);
+	log_tunnel(log_info2, conn, "deleting tunnel\n");
 
-	if (conn->hnd.fd >= 0)
-		close(conn->hnd.fd);
-
-	if (conn->timeout_timer.tpd)
-		triton_timer_del(&conn->timeout_timer);
-
-	if (conn->rtimeout_timer.tpd)
-		triton_timer_del(&conn->rtimeout_timer);
-
-	if (conn->hello_timer.tpd)
-		triton_timer_del(&conn->hello_timer);
+	conn->state = STATE_CLOSE;
 
 	pthread_mutex_lock(&l2tp_lock);
 	l2tp_conn[conn->tid] = NULL;
 	pthread_mutex_unlock(&l2tp_lock);
 
-	if (conn->ctx.tpd)
-		triton_context_unregister(&conn->ctx);
+	if (conn->hnd.tpd)
+		triton_md_unregister_handler(&conn->hnd);
+	if (conn->timeout_timer.tpd)
+		triton_timer_del(&conn->timeout_timer);
+	if (conn->rtimeout_timer.tpd)
+		triton_timer_del(&conn->rtimeout_timer);
+	if (conn->hello_timer.tpd)
+		triton_timer_del(&conn->hello_timer);
 
-	while (!list_empty(&conn->send_queue)) {
-		pack = list_entry(conn->send_queue.next, typeof(*pack), entry);
+	while (!list_empty(&conn->rtms_queue)) {
+		pack = list_first_entry(&conn->rtms_queue, typeof(*pack),
+					entry);
 		list_del(&pack->entry);
 		l2tp_packet_free(pack);
 	}
+	l2tp_tunnel_clear_sendqueue(conn);
 
-	if (conn->challenge)
-		_free(conn->challenge);
+	if (conn->recv_queue)
+		l2tp_tunnel_clear_recvqueue(conn);
 
-	log_tunnel(log_info2, conn, "destroyed\n");
+	if (conn->sessions)
+		l2tp_tunnel_free_sessions(conn);
 
-	mempool_free(conn);
+	pthread_mutex_lock(&conn->ctx_lock);
+	if (conn->ctx.tpd)
+		triton_context_unregister(&conn->ctx);
+	pthread_mutex_unlock(&conn->ctx_lock);
+
+	/* Drop the reference the tunnel holds to itself */
+	tunnel_put(conn);
 }
 
-static void l2tp_tunnel_session_freed(void *data)
+static void l2tp_session_disconnect(struct l2tp_sess_t *sess,
+				    uint16_t res, uint16_t err)
 {
-	struct l2tp_conn_t *conn = l2tp_tunnel_self();
+	/* Session is closing, unsent messages are now useless */
+	l2tp_session_clear_sendqueue(sess);
 
-	if (--conn->sess_count != 0)
-		return;
+	if (l2tp_send_CDN(sess, res, err) < 0)
+		log_session(log_error, sess,
+			    "impossible to notify peer of session disconnection:"
+			    " sending CDN failed, deleting session anyway\n");
 
-	log_tunnel(log_info1, conn, "no more session, disconnecting tunnel\n");
-	if (conn->state != STATE_CLOSE)
-		if (l2tp_send_StopCCN(conn, 1, 0) < 0)
-			log_tunnel(log_error, conn,
-				   "impossible to notify peer of tunnel"
-				   " disconnection, disconnecting anyway\n");
-	l2tp_tunnel_free(conn);
+	l2tp_session_free(sess);
 }
 
-static int l2tp_session_disconnect(struct l2tp_sess_t *sess,
-				   uint16_t res, uint16_t err)
+static void l2tp_session_disconnect_push(struct l2tp_sess_t *sess,
+					 uint16_t res, uint16_t err)
 {
 	if (l2tp_send_CDN(sess, res, err) < 0)
 		log_session(log_error, sess,
-			    "impossible to notify peer of session"
-			    " disconnection, disconnecting anyway\n");
+			    "impossible to notify peer of session disconnection,"
+			    " sending CDN failed, deleting session anyway\n");
+	else if (l2tp_tunnel_push_sendqueue(sess->paren_conn) < 0)
+		log_session(log_error, sess,
+			    "impossible to notify peer of session disconnection:"
+			    " transmitting messages from send queue failed,"
+			    " deleting session anyway\n");
 
-	if (l2tp_session_free(sess) < 0) {
-		log_session(log_error, sess, "impossible to free session,"
-			    " session data have been kept\n");
-		return -1;
-	}
-
-	return 0;
+	l2tp_session_free(sess);
 }
 
-static void l2tp_ppp_finished(struct ap_session *ses)
+static void l2tp_session_apses_finished(void *data)
 {
-	struct l2tp_sess_t *sess = l2tp_session_self();
+	struct l2tp_conn_t *conn = l2tp_tunnel_self();
+	struct l2tp_sess_t *sess;
+	intptr_t sid = (intptr_t)data;
 
-	__sync_sub_and_fetch(&stat_active, 1);
-	if (sess->state1 != STATE_CLOSE) {
+	sess = l2tp_tunnel_get_session(conn, sid);
+	if (sess == NULL)
+		return;
+
+	/* Here, the only valid session state is STATE_ESTB. If the session's
+	 * state was STATE_CLOSE (which happens if session gets closed before
+	 * l2tp_session_apses_finished() gets scheduled), it wouldn't be found
+	 * by l2tp_tunnel_get_session().
+	 */
+	if (sess->state1 == STATE_ESTB) {
 		log_session(log_info1, sess,
-			    "PPP session finished (%s:%s),"
-			    " disconnecting session\n",
-			    ses->ifname, ses->username ? ses->username : "");
-		sess->state1 = STATE_CLOSE;
-		if (l2tp_send_CDN(sess, 2, 0) < 0)
-			log_session(log_error, sess,
-				    "impossible to notify peer of session"
-				    " disconnection, disconnecting anyway\n");
-		if (l2tp_session_free(sess) < 0)
-			log_session(log_error, sess,
-				    "impossible to free session,"
-				    " session data have been kept\n");
+			    "data channel closed, disconnecting session\n");
+		l2tp_session_disconnect_push(sess, 2, 0);
 	} else {
-		/* Called by __l2tp_session_free() via ap_session_terminate().
-		   Now, call __l2tp_session_free() again to finish cleanup. */
-		__l2tp_session_free(sess);
+		log_session(log_warn, sess,
+			    "avoiding disconnection of session with no data channel:"
+			    " invalid state %i\n", sess->state1);
 	}
 }
 
-static void l2tp_ppp_started(struct ap_session *ses)
+static void __apses_destroy(void *data)
 {
-	log_session(log_info1, l2tp_session_self(),
-		    "PPP session started (%s:%s)\n",
-		    ses->ifname, ses->username ? ses->username : "");
+	struct l2tp_sess_t *sess = data;
+
+	pthread_mutex_lock(&sess->apses_lock);
+	triton_context_unregister(&sess->apses_ctx);
+	pthread_mutex_unlock(&sess->apses_lock);
+
+	log_ppp_info2("session destroyed\n");
+
+	__sync_sub_and_fetch(&stat_finishing, 1);
+
+	/* Drop reference to the L2TP session */
+	session_put(sess);
+}
+
+static void apses_finished(struct ap_session *apses)
+{
+	struct l2tp_sess_t *sess = container_of(apses->ctrl, typeof(*sess),
+						ctrl);
+	intptr_t sid = sess->sid;
+	int res = 1;
+
+	switch (sess->apses_state) {
+	case APSTATE_STARTING:
+		__sync_sub_and_fetch(&stat_starting, 1);
+		__sync_add_and_fetch(&stat_finishing, 1);
+		break;
+	case APSTATE_STARTED:
+		__sync_sub_and_fetch(&stat_active, 1);
+		__sync_add_and_fetch(&stat_finishing, 1);
+		break;
+	case APSTATE_FINISHING:
+		break;
+	default:
+		log_ppp_error("impossible to delete session:"
+			      " invalid state %i\n",
+			      sess->apses_state);
+		return;
+	}
+
+	sess->apses_state = APSTATE_FINISHING;
+
+	pthread_mutex_lock(&sess->paren_conn->ctx_lock);
+	if (sess->paren_conn->ctx.tpd)
+		res = triton_context_call(&sess->paren_conn->ctx,
+					  l2tp_session_apses_finished,
+					  (void *)sid);
+	pthread_mutex_unlock(&sess->paren_conn->ctx_lock);
+	if (res < 0)
+		log_ppp_warn("deleting session without notifying L2TP layer:"
+			     " call to L2TP control channel context failed\n");
+
+	/* Don't drop the reference to the session now: session_put() may
+	 * destroy the L2TP session, but the caller expects it to remain valid
+	 * after we return.
+	 */
+	if (triton_context_call(&sess->apses_ctx, __apses_destroy, sess) < 0)
+		log_ppp_error("impossible to delete session:"
+			      " scheduling session destruction failed\n");
+}
+
+static void apses_stop(void *data)
+{
+	struct l2tp_sess_t *sess = container_of(triton_context_self(),
+						typeof(*sess), apses_ctx);
+	intptr_t cause = (intptr_t)data;
+
+	switch (sess->apses_state) {
+	case APSTATE_INIT:
+	case APSTATE_STARTING:
+		__sync_sub_and_fetch(&stat_starting, 1);
+		__sync_add_and_fetch(&stat_finishing, 1);
+		break;
+	case APSTATE_STARTED:
+		__sync_sub_and_fetch(&stat_active, 1);
+		__sync_add_and_fetch(&stat_finishing, 1);
+		break;
+	case APSTATE_FINISHING:
+		break;
+	default:
+		log_ppp_error("impossible to delete session:"
+			      " invalid state %i\n",
+			      sess->apses_state);
+		return;
+	}
+
+	if (sess->apses_state == APSTATE_STARTING ||
+	    sess->apses_state == APSTATE_STARTED) {
+		sess->apses_state = APSTATE_FINISHING;
+		ap_session_terminate(&sess->ppp.ses, cause, 1);
+	} else {
+		intptr_t sid = sess->sid;
+		int res = 1;
+
+		pthread_mutex_lock(&sess->paren_conn->ctx_lock);
+		if (sess->paren_conn->ctx.tpd)
+			res = triton_context_call(&sess->paren_conn->ctx,
+						  l2tp_session_apses_finished,
+						  (void *)sid);
+		pthread_mutex_unlock(&sess->paren_conn->ctx_lock);
+		if (res < 0)
+			log_ppp_warn("deleting session without notifying L2TP layer:"
+				     " call to L2TP control channel context failed\n");
+	}
+
+	/* Execution of __apses_destroy() may have been scheduled by
+	 * ap_session_terminate() (via apses_finished()). We can
+	 * nevertheless call __apses_destroy() synchronously here,
+	 * so that the data channel gets destroyed without uselessly
+	 * waiting for scheduling.
+	 */
+	__apses_destroy(sess);
+}
+
+static void apses_ctx_stop(struct triton_context_t *ctx)
+{
+	intptr_t cause = TERM_ADMIN_RESET;
+
+	log_ppp_info1("context thread is closing, disconnecting session\n");
+	apses_stop((void *)cause);
+}
+
+static void apses_started(struct ap_session *apses)
+{
+	struct l2tp_sess_t *sess = container_of(apses->ctrl, typeof(*sess),
+						ctrl);
+
+	if (sess->apses_state != APSTATE_STARTING) {
+		log_ppp_error("impossible to activate session:"
+			      " invalid state %i\n",
+			      sess->apses_state);
+		return;
+	}
+
+	__sync_sub_and_fetch(&stat_starting, 1);
+	__sync_add_and_fetch(&stat_active, 1);
+	sess->apses_state = APSTATE_STARTED;
+
+	log_ppp_info1("session started over l2tp session %hu-%hu, %hu-%hu\n",
+		      sess->paren_conn->tid, sess->paren_conn->peer_tid,
+		      sess->sid, sess->peer_sid);
+}
+
+static void apses_start(void *data)
+{
+	struct ap_session *apses = data;
+	struct l2tp_sess_t *sess = container_of(apses->ctrl, typeof(*sess),
+						ctrl);
+
+	if (sess->apses_state != APSTATE_INIT) {
+		log_ppp_error("impossible to start session:"
+			      " invalid state %i\n",
+			      sess->apses_state);
+		return;
+	}
+
+	log_ppp_info2("starting data channel for l2tp(%s)\n",
+		      apses->chan_name);
+
+	if (establish_ppp(&sess->ppp) < 0) {
+		intptr_t cause = TERM_NAS_ERROR;
+
+		log_ppp_error("session startup failed,"
+			      " disconnecting session\n");
+		apses_stop((void *)cause);
+	} else
+		sess->apses_state = APSTATE_STARTING;
 }
 
 static void l2tp_session_timeout(struct triton_timer_t *t)
@@ -801,10 +1397,10 @@ static void l2tp_session_timeout(struct triton_timer_t *t)
 	struct l2tp_sess_t *sess = container_of(t, typeof(*sess),
 						timeout_timer);
 
+	triton_timer_del(t);
 	log_session(log_info1, sess, "session establishment timeout,"
 		    " disconnecting session\n");
-	if (l2tp_session_disconnect(sess, 10, 0) < 0)
-		log_session(log_error, sess, "session disconnection failed\n");
+	l2tp_session_disconnect_push(sess, 10, 0);
 }
 
 static struct l2tp_sess_t *l2tp_tunnel_new_session(struct l2tp_conn_t *conn)
@@ -812,6 +1408,7 @@ static struct l2tp_sess_t *l2tp_tunnel_new_session(struct l2tp_conn_t *conn)
 	struct l2tp_sess_t *sess = NULL;
 	struct l2tp_sess_t **sess_search = NULL;
 	ssize_t rdlen = 0;
+	uint16_t count;
 
 	sess = mempool_alloc(l2tp_sess_pool);
 	if (sess == NULL) {
@@ -822,28 +1419,34 @@ static struct l2tp_sess_t *l2tp_tunnel_new_session(struct l2tp_conn_t *conn)
 	}
 	memset(sess, 0, sizeof(*sess));
 
-	rdlen = read(urandom_fd, &sess->sid, sizeof(sess->sid));
-	if (rdlen != sizeof(sess->sid)) {
-		log_tunnel(log_error, conn,
-			   "impossible to allocate new session:"
-			   " reading from urandom failed: %s\n",
-			   (rdlen < 0) ? strerror(errno) : "short read");
-		goto out_err;
-	}
-	if (sess->sid == 0) {
-		log_tunnel(log_error, conn,
-			   "impossible to allocate new session:"
-			   " session ID generation failed\n");
-		goto out_err;
+	for (count = UINT16_MAX; count > 0; --count) {
+		rdlen = read(urandom_fd, &sess->sid, sizeof(sess->sid));
+		if (rdlen != sizeof(sess->sid)) {
+			log_tunnel(log_error, conn,
+				   "impossible to allocate new session:"
+				   " reading from urandom failed: %s\n",
+				   (rdlen < 0) ? strerror(errno) : "short read");
+			goto out_err;
+		}
+
+		if (sess->sid == 0)
+			continue;
+
+		sess_search = tsearch(sess, &conn->sessions, sess_cmp);
+		if (*sess_search != sess)
+			continue;
+
+		break;
 	}
 
-	sess_search = tsearch(sess, &conn->sessions, sess_cmp);
-	if (*sess_search != sess) {
+	if (count == 0) {
 		log_tunnel(log_error, conn,
 			   "impossible to allocate new session:"
 			   " could not find any unused session ID\n");
 		goto out_err;
 	}
+
+	++conn->sess_count;
 
 	return sess;
 
@@ -851,16 +1454,6 @@ out_err:
 	if (sess)
 		mempool_free(sess);
 	return NULL;
-}
-
-static void l2tp_sess_close(struct triton_context_t *ctx)
-{
-	struct l2tp_sess_t *sess = container_of(ctx, typeof(*sess), sctx);
-
-	log_session(log_info1, sess, "context thread is closing,"
-		    " disconnecting session\n");
-	if (l2tp_session_disconnect(sess, 3, 0) < 0)
-		log_session(log_error, sess, "session disconnection failed\n");
 }
 
 static struct l2tp_sess_t *l2tp_tunnel_alloc_session(struct l2tp_conn_t *conn)
@@ -873,89 +1466,30 @@ static struct l2tp_sess_t *l2tp_tunnel_alloc_session(struct l2tp_conn_t *conn)
 
 	sess->paren_conn = conn;
 	sess->peer_sid = 0;
-	sess->state1 = STATE_CLOSE;
+	sess->state1 = STATE_INIT;
 	sess->lns_mode = conn->lns_mode;
 	sess->hide_avps = conn->hide_avps;
 	sess->send_seq = (conf_dataseq == L2TP_DATASEQ_PREFER) ||
 			 (conf_dataseq == L2TP_DATASEQ_REQUIRE);
 	sess->recv_seq = (conf_dataseq == L2TP_DATASEQ_REQUIRE);
 	sess->reorder_timeout = conf_reorder_timeout;
+	INIT_LIST_HEAD(&sess->send_queue);
 
-	sess->sctx.before_switch = log_switch;
-	sess->sctx.close = l2tp_sess_close;
-
-	sess->ctrl.ctx = &sess->sctx;
-	sess->ctrl.type = CTRL_TYPE_L2TP;
-	sess->ctrl.ppp = 1;
-	sess->ctrl.name = "l2tp";
-	sess->ctrl.started = l2tp_ppp_started;
-	sess->ctrl.finished = l2tp_ppp_finished;
-	sess->ctrl.terminate = ppp_terminate;
-	sess->ctrl.max_mtu = conf_ppp_max_mtu;
-	sess->ctrl.mppe = conf_mppe;
-	sess->ctrl.calling_station_id = _malloc(17);
-	sess->ctrl.called_station_id = _malloc(17);
-	u_inet_ntoa(conn->peer_addr.sin_addr.s_addr,
-		    sess->ctrl.calling_station_id);
-	u_inet_ntoa(conn->host_addr.sin_addr.s_addr,
-		    sess->ctrl.called_station_id);
 	sess->timeout_timer.expire = l2tp_session_timeout;
 	sess->timeout_timer.period = conf_timeout * 1000;
 
+	pthread_mutex_init(&sess->apses_lock, NULL);
 	ppp_init(&sess->ppp);
-	sess->ppp.ses.ctrl = &sess->ctrl;
-	sess->ppp.fd = -1;
 
-	if (conf_ip_pool)
-		sess->ppp.ses.ipv4_pool_name = _strdup(conf_ip_pool);
+	/* The tunnel holds a reference to the session */
+	session_hold(sess);
+	/* The session holds a reference to the tunnel and to itself */
+	tunnel_hold(conn);
+	session_hold(sess);
+
+	__sync_add_and_fetch(&stat_sess_starting, 1);
 
 	return sess;
-}
-
-static int l2tp_tunnel_start_session(struct l2tp_sess_t *sess,
-				     triton_event_func start_func,
-				     void *start_param)
-{
-	struct l2tp_conn_t *conn = l2tp_tunnel_self();
-
-	if (triton_context_register(&sess->sctx, &sess->ppp.ses) < 0) {
-		log_tunnel(log_error, conn, "impossible to start new session:"
-			   " context registration failed\n");
-		goto err;
-	}
-	triton_context_wakeup(&sess->sctx);
-	if (triton_timer_add(&sess->sctx, &sess->timeout_timer, 0) < 0) {
-		log_tunnel(log_error, conn, "impossible to start new session:"
-			   " setting session establishment timer failed\n");
-		goto err_ctx;
-	}
-	if (triton_context_call(&sess->sctx, start_func, start_param) < 0) {
-		log_tunnel(log_error, conn, "impossible to start new session:"
-			   " call to session context failed\n");
-		goto err_ctx_timer;
-	}
-
-	__sync_add_and_fetch(&stat_starting, 1);
-	++conn->sess_count;
-
-	return 0;
-
-err_ctx_timer:
-	triton_timer_del(&sess->timeout_timer);
-err_ctx:
-	triton_context_unregister(&sess->sctx);
-err:
-	return -1;
-}
-
-static void l2tp_tunnel_cancel_session(struct l2tp_sess_t *sess)
-{
-	tdelete(sess, &sess->paren_conn->sessions, sess_cmp);
-	if (sess->ctrl.calling_station_id)
-		_free(sess->ctrl.calling_station_id);
-	if (sess->ctrl.called_station_id)
-		_free(sess->ctrl.called_station_id);
-	mempool_free(sess);
 }
 
 static void l2tp_conn_close(struct triton_context_t *ctx)
@@ -964,8 +1498,7 @@ static void l2tp_conn_close(struct triton_context_t *ctx)
 
 	log_tunnel(log_info1, conn, "context thread is closing,"
 		   " disconnecting tunnel\n");
-	l2tp_tunnel_disconnect(conn, 0, 0);
-	l2tp_tunnel_free(conn);
+	l2tp_tunnel_disconnect_push(conn, 0, 0);
 }
 
 static int l2tp_tunnel_start(struct l2tp_conn_t *conn,
@@ -1015,39 +1548,41 @@ static struct l2tp_conn_t *l2tp_tunnel_alloc(const struct sockaddr_in *peer,
 {
 	struct l2tp_conn_t *conn;
 	socklen_t hostaddrlen = sizeof(conn->host_addr);
-	uint16_t tid;
+	uint16_t count;
+	ssize_t rdlen;
 	int flag;
 
 	conn = mempool_alloc(l2tp_conn_pool);
 	if (!conn) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " memory allocation failed\n");
-		return NULL;
+		goto err;
 	}
 
 	memset(conn, 0, sizeof(*conn));
+	pthread_mutex_init(&conn->ctx_lock, NULL);
 	INIT_LIST_HEAD(&conn->send_queue);
+	INIT_LIST_HEAD(&conn->rtms_queue);
 
 	conn->hnd.fd = socket(PF_INET, SOCK_DGRAM, 0);
 	if (conn->hnd.fd < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " socket(PF_INET) failed: %s\n", strerror(errno));
-		mempool_free(conn);
-		return NULL;
+		goto err_conn;
 	}
 
 	flag = fcntl(conn->hnd.fd, F_GETFD);
 	if (flag < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " fcntl(F_GETFD) failed: %s\n", strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 	flag = fcntl(conn->hnd.fd, F_SETFD, flag | FD_CLOEXEC);
 	if (flag < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " fcntl(F_SETFD) failed: %s\n",
 			  strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 
 	flag = 1;
@@ -1056,12 +1591,12 @@ static struct l2tp_conn_t *l2tp_tunnel_alloc(const struct sockaddr_in *peer,
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " setsockopt(SO_REUSEADDR) failed: %s\n",
 			  strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 	if (bind(conn->hnd.fd, host, sizeof(*host))) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " bind() failed: %s\n", strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 
 	memcpy(&conn->peer_addr, peer, sizeof(*peer));
@@ -1073,7 +1608,7 @@ static struct l2tp_conn_t *l2tp_tunnel_alloc(const struct sockaddr_in *peer,
 		    sizeof(conn->peer_addr))) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " connect() failed: %s\n", strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 	if (!port_set)
 		conn->peer_addr.sin_port = peer->sin_port;
@@ -1082,69 +1617,106 @@ static struct l2tp_conn_t *l2tp_tunnel_alloc(const struct sockaddr_in *peer,
 	if (flag < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " fcntl(F_GETFL) failed: %s\n", strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 	flag = fcntl(conn->hnd.fd, F_SETFL, flag | O_NONBLOCK);
 	if (flag < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " fcntl(F_SETFL) failed: %s\n", strerror(errno));
-		goto out_err;
-	}
-
-	pthread_mutex_lock(&l2tp_lock);
-	for (tid = l2tp_tid + 1; tid != l2tp_tid; tid++) {
-		if (tid == L2TP_MAX_TID)
-			tid = 1;
-		if (!l2tp_conn[tid]) {
-			l2tp_conn[tid] = conn;
-			conn->tid = tid;
-			break;
-		}
-	}
-	pthread_mutex_unlock(&l2tp_lock);
-
-	if (!conn->tid) {
-		log_error("l2tp: impossible to allocate new tunnel:"
-			  " no more tunnel available\n");
-		goto out_err;
+		goto err_conn_fd;
 	}
 
 	if (getsockname(conn->hnd.fd, &conn->host_addr, &hostaddrlen) < 0) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " getsockname() failed: %s\n", strerror(errno));
-		goto out_err;
+		goto err_conn_fd;
 	}
 	if (hostaddrlen != sizeof(conn->host_addr)) {
 		log_error("l2tp: impossible to allocate new tunnel:"
 			  " inconsistent address length returned by"
 			  " getsockname(): %i bytes instead of %zu\n",
 			  hostaddrlen, sizeof(conn->host_addr));
-		goto out_err;
+		goto err_conn_fd;
 	}
 
+	conn->recv_queue_sz = conf_recv_window;
+	conn->recv_queue = _malloc(conn->recv_queue_sz *
+				   sizeof(*conn->recv_queue));
+	if (conn->recv_queue == NULL) {
+		log_error("l2tp: impossible to allocate new tunnel:"
+			  " allocating reception queue (%zu bytes) failed\n",
+			  conn->recv_queue_sz * sizeof(*conn->recv_queue));
+		goto err_conn_fd;
+	}
+	memset(conn->recv_queue, 0,
+	       conn->recv_queue_sz * sizeof(*conn->recv_queue));
+	conn->recv_queue_offt = 0;
+
+	for (count = UINT16_MAX; count > 0; --count) {
+		rdlen = read(urandom_fd, &conn->tid, sizeof(conn->tid));
+		if (rdlen != sizeof(conn->tid)) {
+			log_error("l2tp: impossible to allocate new tunnel:"
+				  " reading from urandom failed: %s\n",
+				  (rdlen < 0) ? strerror(errno) : "short read");
+			goto err_conn_fd_queue;
+		}
+
+		if (conn->tid == 0)
+			continue;
+
+		pthread_mutex_lock(&l2tp_lock);
+		if (l2tp_conn[conn->tid]) {
+			pthread_mutex_unlock(&l2tp_lock);
+			continue;
+		}
+		l2tp_conn[conn->tid] = conn;
+		pthread_mutex_unlock(&l2tp_lock);
+
+		break;
+	}
+
+	if (count == 0) {
+		log_error("l2tp: impossible to allocate new tunnel:"
+			   " could not find any unused tunnel ID\n");
+		goto err_conn_fd_queue;
+	}
+
+	conn->state = STATE_INIT;
 	conn->framing_cap = framing_cap;
 
 	conn->ctx.before_switch = log_switch;
 	conn->ctx.close = l2tp_conn_close;
 	conn->hnd.read = l2tp_conn_read;
-	conn->timeout_timer.expire = l2tp_timeout;
+	conn->timeout_timer.expire = l2tp_tunnel_timeout;
 	conn->timeout_timer.period = conf_timeout * 1000;
 	conn->rtimeout_timer.expire = l2tp_rtimeout;
 	conn->rtimeout_timer.period = conf_rtimeout * 1000;
 	conn->hello_timer.expire = l2tp_send_HELLO;
 	conn->hello_timer.period = conf_hello_interval * 1000;
 
+	conn->rtimeout = conf_rtimeout * 1000;
+	conn->rtimeout_cap = conf_rtimeout_cap * 1000;
+	conn->max_retransmit = conf_retransmit;
+
 	conn->sessions = NULL;
 	conn->sess_count = 0;
 	conn->lns_mode = lns_mode;
 	conn->port_set = port_set;
 	conn->hide_avps = hide_avps;
+	conn->peer_rcv_wnd_sz = DEFAULT_PEER_RECV_WINDOW_SIZE;
+	tunnel_hold(conn);
+
+	__sync_add_and_fetch(&stat_conn_starting, 1);
 
 	return conn;
 
-out_err:
+err_conn_fd_queue:
+	_free(conn->recv_queue);
+err_conn_fd:
 	close(conn->hnd.fd);
+err_conn:
 	mempool_free(conn);
+err:
 	return NULL;
 }
 
@@ -1167,6 +1739,99 @@ static inline int l2tp_tunnel_update_peerport(struct l2tp_conn_t *conn,
 	return res;
 }
 
+static int l2tp_session_start_data_channel(struct l2tp_sess_t *sess)
+{
+	sess->apses_ctx.before_switch = log_switch;
+	sess->apses_ctx.close = apses_ctx_stop;
+
+	sess->ctrl.ctx = &sess->apses_ctx;
+	sess->ctrl.type = CTRL_TYPE_L2TP;
+	sess->ctrl.ppp = 1;
+	sess->ctrl.name = "l2tp";
+	sess->ctrl.started = apses_started;
+	sess->ctrl.finished = apses_finished;
+	sess->ctrl.terminate = ppp_terminate;
+	sess->ctrl.max_mtu = conf_ppp_max_mtu;
+	sess->ctrl.mppe = conf_mppe;
+
+	sess->ctrl.calling_station_id = _malloc(17);
+	if (sess->ctrl.calling_station_id == NULL) {
+		log_session(log_error, sess,
+			    "impossible to start data channel:"
+			    " allocation of calling station ID failed\n");
+		goto err;
+	}
+	u_inet_ntoa(sess->paren_conn->peer_addr.sin_addr.s_addr,
+		    sess->ctrl.calling_station_id);
+
+	sess->ctrl.called_station_id = _malloc(17);
+	if (sess->ctrl.called_station_id == NULL) {
+		log_session(log_error, sess,
+			    "impossible to start data channel:"
+			    " allocation of called station ID failed\n");
+		goto err;
+	}
+	u_inet_ntoa(sess->paren_conn->host_addr.sin_addr.s_addr,
+		    sess->ctrl.called_station_id);
+
+	if (conf_ip_pool) {
+		sess->ppp.ses.ipv4_pool_name = _strdup(conf_ip_pool);
+		if (sess->ppp.ses.ipv4_pool_name == NULL) {
+			log_session(log_error, sess,
+				    "impossible to start data channel:"
+				    " allocation of IPv4 pool name failed\n");
+			goto err;
+		}
+	}
+
+	sess->ppp.ses.ctrl = &sess->ctrl;
+	sess->apses_state = APSTATE_INIT;
+
+	/* The data channel holds a reference to the control session */
+	session_hold(sess);
+
+	if (triton_context_register(&sess->apses_ctx, &sess->ppp.ses) < 0) {
+		log_session(log_error, sess,
+			    "impossible to start data channel:"
+			    " context registration failed\n");
+		goto err_put;
+	}
+
+	triton_context_wakeup(&sess->apses_ctx);
+
+	if (triton_context_call(&sess->apses_ctx, apses_start,
+				&sess->ppp.ses) < 0) {
+		log_session(log_error, sess,
+			    "impossible to start data channel:"
+			    " call to data channel context failed\n");
+		goto err_put_ctx;
+	}
+
+	__sync_add_and_fetch(&stat_starting, 1);
+
+	return 0;
+
+err_put_ctx:
+	triton_context_unregister(&sess->apses_ctx);
+err_put:
+	session_put(sess);
+err:
+	if (sess->ppp.ses.ipv4_pool_name) {
+		_free(sess->ppp.ses.ipv4_pool_name);
+		sess->ppp.ses.ipv4_pool_name = NULL;
+	}
+	if (sess->ctrl.called_station_id) {
+		_free(sess->ctrl.called_station_id);
+		sess->ctrl.called_station_id = NULL;
+	}
+	if (sess->ctrl.calling_station_id) {
+		_free(sess->ctrl.calling_station_id);
+		sess->ctrl.calling_station_id = NULL;
+	}
+
+	return -1;
+}
+
 static int l2tp_session_connect(struct l2tp_sess_t *sess)
 {
 	struct sockaddr_pppol2tp pppox_addr;
@@ -1175,6 +1840,9 @@ static int l2tp_session_connect(struct l2tp_sess_t *sess)
 	int flg;
 	uint16_t peer_port;
 	char addr[17];
+
+	if (sess->timeout_timer.tpd)
+		triton_timer_del(&sess->timeout_timer);
 
 	sess->ppp.fd = socket(AF_PPPOX, SOCK_DGRAM, PX_PROTO_OL2TP);
 	if (sess->ppp.fd < 0) {
@@ -1250,28 +1918,26 @@ static int l2tp_session_connect(struct l2tp_sess_t *sess)
 
 	u_inet_ntoa(conn->peer_addr.sin_addr.s_addr, addr);
 	peer_port = ntohs(conn->peer_addr.sin_port);
-	if (_asprintf(&sess->ppp.ses.chan_name, "%s:%i session %i",
-		      addr, peer_port, sess->peer_sid) < 0) {
+	if (_asprintf(&sess->ppp.ses.chan_name,
+		      "%s:%hu session %hu-%hu, %hu-%hu",
+		      addr, peer_port,
+		      sess->paren_conn->tid, sess->paren_conn->peer_tid,
+		      sess->sid, sess->peer_sid) < 0) {
 		log_session(log_error, sess, "impossible to connect session:"
 			    " setting session's channel name failed\n");
 		goto out_err;
 	}
 
 	triton_event_fire(EV_CTRL_STARTED, &sess->ppp.ses);
+	__sync_sub_and_fetch(&stat_sess_starting, 1);
+	__sync_add_and_fetch(&stat_sess_active, 1);
+	sess->state1 = STATE_ESTB;
 
-	if (sess->timeout_timer.tpd)
-		triton_timer_del(&sess->timeout_timer);
-
-	if (establish_ppp(&sess->ppp)) {
+	if (l2tp_session_start_data_channel(sess) < 0) {
 		log_session(log_error, sess, "impossible to connect session:"
-			    "PPP establishment failed\n");
+			    " starting data channel failed\n");
 		goto out_err;
 	}
-
-	__sync_sub_and_fetch(&stat_starting, 1);
-	__sync_add_and_fetch(&stat_active, 1);
-
-	sess->state1 = STATE_PPP;
 
 	return 0;
 
@@ -1292,6 +1958,9 @@ static int l2tp_tunnel_connect(struct l2tp_conn_t *conn)
 	struct sockaddr_pppol2tp pppox_addr;
 	int tunnel_fd;
 	int flg;
+
+	if (conn->timeout_timer.tpd)
+		triton_timer_del(&conn->timeout_timer);
 
 	memset(&pppox_addr, 0, sizeof(pppox_addr));
 	pppox_addr.sa_family = AF_PPPOX;
@@ -1337,10 +2006,11 @@ static int l2tp_tunnel_connect(struct l2tp_conn_t *conn)
 			goto err_fd;
 		}
 
-	if (conn->timeout_timer.tpd)
-		triton_timer_del(&conn->timeout_timer);
-
 	close(tunnel_fd);
+
+	__sync_sub_and_fetch(&stat_conn_starting, 1);
+	__sync_add_and_fetch(&stat_conn_active, 1);
+	conn->state = STATE_ESTB;
 
 	return 0;
 
@@ -1350,144 +2020,76 @@ err:
 	return -1;
 }
 
-static int l2tp_retransmit(struct l2tp_conn_t *conn)
+static void l2tp_rtimeout(struct triton_timer_t *tm)
 {
+	struct l2tp_conn_t *conn = container_of(tm, typeof(*conn),
+						rtimeout_timer);
 	struct l2tp_packet_t *pack;
 
-	pack = list_entry(conn->send_queue.next, typeof(*pack), entry);
-	pack->hdr.Nr = htons(conn->Nr);
-	log_tunnel(log_info2, conn, "retransmitting packet %hu\n",
-		   ntohs(pack->hdr.Ns));
+	if (list_empty(&conn->rtms_queue)) {
+		log_tunnel(log_warn, conn,
+			   "impossible to handle retransmission:"
+			   " retransmission queue is empty\n");
+
+		return;
+	}
+
+	pack = list_first_entry(&conn->rtms_queue, typeof(*pack), entry);
+
+	if (++conn->retransmit > conn->max_retransmit) {
+		log_tunnel(log_warn, conn,
+			   "no acknowledgement from peer after %i retransmissions,"
+			   " deleting tunnel\n", conn->retransmit - 1);
+		goto err;
+	}
+
+	log_tunnel(log_info2, conn, "retransmission #%i\n", conn->retransmit);
 	if (conf_verbose) {
-		log_tunnel(log_info2, conn, "retransmit (duplicate) ");
+		log_tunnel(log_info2, conn, "retransmit (timeout) ");
 		l2tp_packet_print(pack, log_info2);
 	}
-	if (l2tp_packet_send(conn->hnd.fd, pack) < 0) {
+
+	if (__l2tp_tunnel_send(conn, pack) < 0) {
 		log_tunnel(log_error, conn,
-			   "packet retransmission failure\n");
-		return -1;
+			   "impossible to handle retransmission:"
+			   " sending packet failed, deleting tunnel\n");
+		goto err;
 	}
 
-	return 0;
-}
+	conn->rtimeout_timer.period *= 2;
+	if (conn->rtimeout_timer.period > conn->rtimeout_cap)
+		conn->rtimeout_timer.period = conn->rtimeout_cap;
 
-static void l2tp_rtimeout(struct triton_timer_t *t)
-{
-	struct l2tp_conn_t *conn = container_of(t, typeof(*conn), rtimeout_timer);
-	struct l2tp_packet_t *pack;
-
-	if (!list_empty(&conn->send_queue)) {
-		if (++conn->retransmit <= conf_retransmit) {
-			pack = list_entry(conn->send_queue.next, typeof(*pack), entry);
-			pack->hdr.Nr = htons(conn->Nr);
-			log_tunnel(log_info2, conn,
-				   "retransmission %i (packet %hu)\n",
-				   conn->retransmit, ntohs(pack->hdr.Ns));
-			if (conf_verbose) {
-				log_tunnel(log_info2, conn,
-					   "retransmit (timeout) ");
-				l2tp_packet_print(pack, log_info2);
-			}
-			if (l2tp_packet_send(conn->hnd.fd, pack) < 0)
-				log_tunnel(log_error, conn,
-					   "packet retransmission failure\n");
-		} else {
-			log_tunnel(log_info1, conn, "too many retransmissions,"
-				   " disconnecting tunnel\n");
-			l2tp_tunnel_free(conn);
-		}
+	if (triton_timer_mod(&conn->rtimeout_timer, 0) < 0) {
+		log_tunnel(log_error, conn,
+			   "impossible to handle retransmission:"
+			   " updating retransmission timer failed,"
+			   " deleting tunnel\n");
+		goto err;
 	}
+
+	return;
+
+err:
+	triton_timer_del(tm);
+	l2tp_tunnel_free(conn);
 }
 
-static void l2tp_timeout(struct triton_timer_t *t)
+static void l2tp_tunnel_timeout(struct triton_timer_t *t)
 {
 	struct l2tp_conn_t *conn = container_of(t, typeof(*conn),
 						timeout_timer);
 
+	triton_timer_del(t);
 	log_tunnel(log_info1, conn, "tunnel establishment timeout,"
 		   " disconnecting tunnel\n");
-	l2tp_tunnel_disconnect(conn, 1, 0);
-	l2tp_tunnel_free(conn);
-}
-
-static int l2tp_tunnel_send(struct l2tp_conn_t *conn,
-			    struct l2tp_packet_t *pack)
-{
-	const struct l2tp_attr_t *msg_type = NULL;
-	void (*log_func)(const char *fmt, ...) = NULL;
-
-	conn->retransmit = 0;
-
-	pack->hdr.tid = htons(conn->peer_tid);
-	pack->hdr.Nr = htons(conn->Nr);
-	pack->hdr.Ns = htons(conn->Ns);
-
-	if (conf_verbose) {
-		if (list_empty(&pack->attrs))
-			log_func = log_debug;
-		else {
-			msg_type = list_entry(pack->attrs.next,
-					      typeof(*msg_type), entry);
-			if (msg_type->val.uint16 == Message_Type_Hello)
-				log_func = log_debug;
-			else
-				log_func = log_info2;
-		}
-		log_tunnel(log_func, conn, "send ");
-		l2tp_packet_print(pack, log_func);
-	}
-
-	if (l2tp_packet_send(conn->hnd.fd, pack)) {
-		log_tunnel(log_error, conn, "packet transmission failure\n");
-		goto out_err;
-	}
-
-	if (!list_empty(&pack->attrs)) {
-		conn->Ns++;
-		list_add_tail(&pack->entry, &conn->send_queue);
-		if (!conn->rtimeout_timer.tpd)
-			if (triton_timer_add(&conn->ctx,
-					     &conn->rtimeout_timer, 0) < 0)
-				log_tunnel(log_warn, conn,
-					   "setting retransmission timer for"
-					   " packet %hu failed\n",
-					   conn->Ns - 1);
-	} else
-		l2tp_packet_free(pack);
-
-	return 0;
-
-out_err:
-	l2tp_packet_free(pack);
-	return -1;
-}
-
-static void __l2tp_tunnel_send(void *pack)
-{
-	l2tp_tunnel_send(l2tp_tunnel_self(), pack);
-}
-
-static int l2tp_session_send(struct l2tp_sess_t *sess,
-			     struct l2tp_packet_t *pack)
-{
-	pack->hdr.sid = htons(sess->peer_sid);
-	if (triton_context_call(&sess->paren_conn->ctx,
-				__l2tp_tunnel_send, pack) < 0) {
-		log_session(log_error, sess, "impossible to send packet:"
-			    " call to parent tunnel failed\n");
-		goto out_err;
-	}
-
-	return 0;
-
-out_err:
-	l2tp_packet_free(pack);
-	return -1;
+	l2tp_tunnel_disconnect_push(conn, 1, 0);
 }
 
 static int l2tp_send_ZLB(struct l2tp_conn_t *conn)
 {
 	struct l2tp_packet_t *pack;
+	int res;
 
 	log_tunnel(log_debug, conn, "sending ZLB\n");
 
@@ -1498,13 +2100,22 @@ static int l2tp_send_ZLB(struct l2tp_conn_t *conn)
 		return -1;
 	}
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
+	/* ZLB messages are special: they take no slot in the control message
+	 * sequence number space and never have to be retransmitted. So they're
+	 * sent directly by __l2tp_tunnel_send(), thus bypassing the send and
+	 * retransmission queues.
+	 */
+	pack->hdr.tid = htons(conn->peer_tid);
+	pack->hdr.Ns = htons(conn->Ns);
+
+	res = __l2tp_tunnel_send(conn, pack);
+	if (res < 0)
 		log_tunnel(log_error, conn, "impossible to send ZLB:"
 			   " sending packet failed\n");
-		return -1;
-	}
 
-	return 0;
+	l2tp_packet_free(pack);
+
+	return res;
 }
 
 static void l2tp_send_HELLO(struct triton_timer_t *t)
@@ -1515,16 +2126,27 @@ static void l2tp_send_HELLO(struct triton_timer_t *t)
 	log_tunnel(log_debug, conn, "sending HELLO\n");
 
 	pack = l2tp_packet_alloc(2, Message_Type_Hello, &conn->peer_addr,
-				 conn->hide_avps, conf_secret, conf_secret_len);
+				 conn->hide_avps, conn->secret,
+				 conn->secret_len);
 	if (!pack) {
 		log_tunnel(log_error, conn, "impossible to send HELLO:"
-			   " packet allocation failed\n");
-		return;
+			   " packet allocation failed, deleting tunnel\n");
+		goto err;
 	}
 
-	if (l2tp_tunnel_send(conn, pack) < 0)
+	l2tp_tunnel_send(conn, pack);
+
+	if (l2tp_tunnel_push_sendqueue(conn) < 0) {
 		log_tunnel(log_error, conn, "impossible to send HELLO:"
-			   " sending packet failed\n");
+			   " transmitting messages from send queue failed,"
+			   " deleting tunnel\n");
+		goto err;
+	}
+
+	return;
+
+err:
+	l2tp_tunnel_free(conn);
 }
 
 static void l2tp_send_SCCRQ(void *peer_addr)
@@ -1538,7 +2160,7 @@ static void l2tp_send_SCCRQ(void *peer_addr)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Start_Ctrl_Conn_Request,
 				 &conn->peer_addr, conn->hide_avps,
-				 conf_secret, conf_secret_len);
+				 conn->secret, conn->secret_len);
 	if (pack == NULL) {
 		log_tunnel(log_error, conn, "impossible to send SCCRQ:"
 			   " packet allocation failed\n");
@@ -1573,6 +2195,12 @@ static void l2tp_send_SCCRQ(void *peer_addr)
 			   " adding data to packet failed\n");
 		goto pack_err;
 	}
+	if (l2tp_packet_add_int16(pack, Recv_Window_Size, conn->recv_queue_sz,
+				  1) < 0) {
+		log_tunnel(log_error, conn, "impossible to send SCCRQ:"
+			   " adding data to packet failed\n");
+		goto pack_err;
+	}
 
 	if (u_randbuf(&chall_len, sizeof(chall_len), &err) < 0) {
 		if (err)
@@ -1592,9 +2220,11 @@ static void l2tp_send_SCCRQ(void *peer_addr)
 		goto pack_err;
 	}
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
+	l2tp_tunnel_send(conn, pack);
+
+	if (l2tp_tunnel_push_sendqueue(conn) < 0) {
 		log_tunnel(log_error, conn, "impossible to send SCCRQ:"
-			   " sending packet failed\n");
+			   " transmitting messages from send queue failed\n");
 		goto err;
 	}
 
@@ -1618,7 +2248,7 @@ static void l2tp_send_SCCRP(struct l2tp_conn_t *conn)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Start_Ctrl_Conn_Reply,
 				 &conn->peer_addr, conn->hide_avps,
-				 conf_secret, conf_secret_len);
+				 conn->secret, conn->secret_len);
 	if (!pack) {
 		log_tunnel(log_error, conn, "impossible to send SCCRP:"
 			   " packet allocation failed\n");
@@ -1653,6 +2283,12 @@ static void l2tp_send_SCCRP(struct l2tp_conn_t *conn)
 			   " adding data to packet failed\n");
 		goto out_err;
 	}
+	if (l2tp_packet_add_int16(pack, Recv_Window_Size, conn->recv_queue_sz,
+				  1) < 0) {
+		log_tunnel(log_error, conn, "impossible to send SCCRP:"
+			   " adding data to packet failed\n");
+		goto out_err;
+	}
 
 	if (l2tp_tunnel_genchallresp(Message_Type_Start_Ctrl_Conn_Reply,
 				     conn, pack) < 0) {
@@ -1679,9 +2315,11 @@ static void l2tp_send_SCCRP(struct l2tp_conn_t *conn)
 		goto out_err;
 	}
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
+	l2tp_tunnel_send(conn, pack);
+
+	if (l2tp_tunnel_push_sendqueue(conn) < 0) {
 		log_tunnel(log_error, conn, "impossible to send SCCRP:"
-			   " sending packet failed\n");
+			   " transmitting messages from send queue failed\n");
 		goto out;
 	}
 
@@ -1703,7 +2341,7 @@ static int l2tp_send_SCCCN(struct l2tp_conn_t *conn)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Start_Ctrl_Conn_Connected,
 				 &conn->peer_addr, conn->hide_avps,
-				 conf_secret, conf_secret_len);
+				 conn->secret, conn->secret_len);
 	if (pack == NULL) {
 		log_tunnel(log_error, conn, "impossible to send SCCCN:"
 			   " packet allocation failed\n");
@@ -1718,11 +2356,7 @@ static int l2tp_send_SCCCN(struct l2tp_conn_t *conn)
 	}
 	l2tp_tunnel_storechall(conn, NULL);
 
-	if (l2tp_tunnel_send(conn, pack) < 0) {
-		log_tunnel(log_error, conn, "impossible to send SCCCN:"
-			   " sending packet failed\n");
-		goto err;
-	}
+	l2tp_tunnel_send(conn, pack);
 
 	return 0;
 
@@ -1740,7 +2374,8 @@ static int l2tp_send_ICRQ(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Incoming_Call_Request,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (pack == NULL) {
 		log_session(log_error, sess, "impossible to send ICRQ:"
 			    " packet allocation failed\n");
@@ -1759,10 +2394,10 @@ static int l2tp_send_ICRQ(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
+	if (l2tp_session_try_send(sess, pack) < 0) {
 		log_session(log_error, sess, "impossible to send ICRQ:"
-			    " sending packet failed\n");
-		return -1;
+			    " too many outstanding packets in send queue\n");
+		goto out_err;
 	}
 
 	return 0;
@@ -1780,7 +2415,8 @@ static int l2tp_send_ICRP(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Incoming_Call_Reply,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (!pack) {
 		log_session(log_error, sess, "impossible to send ICRP:"
 			    " packet allocation failed\n");
@@ -1794,11 +2430,7 @@ static int l2tp_send_ICRP(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
-		log_session(log_error, sess, "impossible to send ICRP:"
-			    " sending packet failed\n");
-		return -1;
-	}
+	l2tp_session_send(sess, pack);
 
 	return 0;
 
@@ -1815,7 +2447,8 @@ static int l2tp_send_ICCN(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Incoming_Call_Connected,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (pack == 0) {
 		log_session(log_error, sess, "impossible to send ICCN:"
 			    " packet allocation failed\n");
@@ -1839,11 +2472,7 @@ static int l2tp_send_ICCN(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
-		log_session(log_error, sess, "impossible to send ICCN:"
-			    " sending packet failed\n");
-		return -1;
-	}
+	l2tp_session_send(sess, pack);
 
 	return 0;
 
@@ -1860,7 +2489,8 @@ static int l2tp_send_OCRQ(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Outgoing_Call_Request,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (!pack) {
 		log_session(log_error, sess, "impossible to send OCRQ:"
 			    " packet allocation failed\n");
@@ -1904,10 +2534,10 @@ static int l2tp_send_OCRQ(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
+	if (l2tp_session_try_send(sess, pack) < 0) {
 		log_session(log_error, sess, "impossible to send OCRQ:"
-			    " sending packet failed\n");
-		return -1;
+			    " too many outstanding packets in send queue\n");
+		goto out_err;
 	}
 
 	return 0;
@@ -1925,7 +2555,8 @@ static int l2tp_send_OCRP(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Outgoing_Call_Reply,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (pack == NULL) {
 		log_session(log_error, sess, "impossible to send OCRP:"
 			    " packet allocation failed\n");
@@ -1939,11 +2570,7 @@ static int l2tp_send_OCRP(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
-		log_session(log_error, sess, "impossible to send OCRP:"
-			    " sending packet failed\n");
-		return -1;
-	}
+	l2tp_session_send(sess, pack);
 
 	return 0;
 
@@ -1960,7 +2587,8 @@ static int l2tp_send_OCCN(struct l2tp_sess_t *sess)
 
 	pack = l2tp_packet_alloc(2, Message_Type_Outgoing_Call_Connected,
 				 &sess->paren_conn->peer_addr, sess->hide_avps,
-				 conf_secret, conf_secret_len);
+				 sess->paren_conn->secret,
+				 sess->paren_conn->secret_len);
 	if (pack == NULL) {
 		log_session(log_error, sess, "impossible to send OCCN:"
 			    " packet allocation failed\n");
@@ -1984,17 +2612,91 @@ static int l2tp_send_OCCN(struct l2tp_sess_t *sess)
 		goto out_err;
 	}
 
-	if (l2tp_session_send(sess, pack) < 0) {
-		log_session(log_error, sess, "impossible to send OCCN:"
-			    " sending packet failed\n");
-		return -1;
-	}
+	l2tp_session_send(sess, pack);
 
 	return 0;
 
 out_err:
 	l2tp_packet_free(pack);
 	return -1;
+}
+
+static void l2tp_tunnel_finwait_timeout(struct triton_timer_t *tm)
+{
+	struct l2tp_conn_t *conn = container_of(tm, typeof(*conn),
+						timeout_timer);
+
+	triton_timer_del(tm);
+	log_tunnel(log_info2, conn, "tunnel disconnection timeout\n");
+	l2tp_tunnel_free(conn);
+}
+
+static void l2tp_tunnel_finwait(struct l2tp_conn_t *conn)
+{
+	int rtimeout;
+	int indx;
+
+	switch (conn->state) {
+	case STATE_WAIT_SCCRP:
+	case STATE_WAIT_SCCCN:
+		__sync_sub_and_fetch(&stat_conn_starting, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
+		break;
+	case STATE_ESTB:
+		__sync_sub_and_fetch(&stat_conn_active, 1);
+		__sync_add_and_fetch(&stat_conn_finishing, 1);
+		break;
+	case STATE_FIN:
+		break;
+	case STATE_FIN_WAIT:
+	case STATE_CLOSE:
+		return;
+	default:
+		log_tunnel(log_error, conn,
+			   "impossible to disconnect tunnel:"
+			   " invalid state %i\n",
+			   conn->state);
+		return;
+	}
+
+	conn->state = STATE_FIN_WAIT;
+
+	if (conn->timeout_timer.tpd)
+		triton_timer_del(&conn->timeout_timer);
+	if (conn->hello_timer.tpd)
+		triton_timer_del(&conn->hello_timer);
+
+	/* Too late to send outstanding messages */
+	l2tp_tunnel_clear_sendqueue(conn);
+
+	if (conn->sessions)
+		l2tp_tunnel_free_sessions(conn);
+
+	/* Keep tunnel up during a full retransmission cycle */
+	conn->timeout_timer.period = 0;
+	rtimeout = conn->rtimeout;
+	for (indx = 0; indx < conn->max_retransmit; ++indx) {
+		conn->timeout_timer.period += rtimeout;
+		rtimeout *= 2;
+		if (rtimeout > conn->rtimeout_cap)
+			rtimeout = conn->rtimeout_cap;
+	}
+	conn->timeout_timer.expire = l2tp_tunnel_finwait_timeout;
+
+	if (triton_timer_add(&conn->ctx, &conn->timeout_timer, 0) < 0) {
+		log_tunnel(log_warn, conn,
+			   "impossible to start the disconnection timer,"
+			   " disconnecting immediately\n");
+
+		/* FIN-WAIT state occurs upon reception of a StopCCN message
+		 * which has to be acknowledged. This is normally handled by
+		 * the caller, but here l2tp_tunnel_free() will close the L2TP
+		 * socket. So we have to manually send the acknowledgement
+		 * first.
+		 */
+		l2tp_send_ZLB(conn);
+		l2tp_tunnel_free(conn);
+	}
 }
 
 static int l2tp_recv_SCCRQ(const struct l2tp_serv_t *serv,
@@ -2007,6 +2709,7 @@ static int l2tp_recv_SCCRQ(const struct l2tp_serv_t *serv,
 	const struct l2tp_attr_t *assigned_cid = NULL;
 	const struct l2tp_attr_t *framing_cap = NULL;
 	const struct l2tp_attr_t *router_id = NULL;
+	const struct l2tp_attr_t *recv_window_size = NULL;
 	const struct l2tp_attr_t *challenge = NULL;
 	struct l2tp_conn_t *conn = NULL;
 	struct sockaddr_in host_addr = { 0 };
@@ -2042,6 +2745,9 @@ static int l2tp_recv_SCCRQ(const struct l2tp_serv_t *serv,
 				break;
 			case Assigned_Tunnel_ID:
 				assigned_tid = attr;
+				break;
+			case Recv_Window_Size:
+				recv_window_size = attr;
 				break;
 			case Challenge:
 				challenge = attr;
@@ -2098,6 +2804,30 @@ static int l2tp_recv_SCCRQ(const struct l2tp_serv_t *serv,
 		}
 		tid = conn->tid;
 
+		if (recv_window_size) {
+			conn->peer_rcv_wnd_sz = recv_window_size->val.uint16;
+			if (conn->peer_rcv_wnd_sz == 0 ||
+			    conn->peer_rcv_wnd_sz > RECV_WINDOW_SIZE_MAX) {
+				log_error("l2tp: impossible to handle SCCRQ from %s:"
+					  " invalid Receive Window Size %hu\n",
+					  src_addr, conn->peer_rcv_wnd_sz);
+				l2tp_tunnel_free(conn);
+				return -1;
+			}
+		}
+
+		if (conf_secret) {
+			conn->secret = _strdup(conf_secret);
+			if (conn->secret == NULL) {
+				log_error("l2tp: impossible to handle SCCRQ from %s:"
+					  " secret allocation failed\n",
+					  src_addr);
+				l2tp_tunnel_free(conn);
+				return -1;
+			}
+			conn->secret_len = strlen(conn->secret);
+		}
+
 		if (l2tp_tunnel_storechall(conn, challenge) < 0) {
 			log_error("l2tp: impossible to handle SCCRQ from %s:"
 				  " storing challenge failed\n", src_addr);
@@ -2139,6 +2869,7 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 	const struct l2tp_attr_t *protocol_version = NULL;
 	const struct l2tp_attr_t *assigned_tid = NULL;
 	const struct l2tp_attr_t *framing_cap = NULL;
+	const struct l2tp_attr_t *recv_window_size = NULL;
 	const struct l2tp_attr_t *challenge = NULL;
 	const struct l2tp_attr_t *challenge_resp = NULL;
 	const struct l2tp_attr_t *unknown_attr = NULL;
@@ -2160,7 +2891,6 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 		case Bearer_Capabilities:
 		case Firmware_Revision:
 		case Vendor_Name:
-		case Recv_Window_Size:
 			break;
 		case Protocol_Version:
 			protocol_version = attr;
@@ -2170,6 +2900,9 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 			break;
 		case Assigned_Tunnel_ID:
 			assigned_tid = attr;
+			break;
+		case Recv_Window_Size:
+			recv_window_size = attr;
 			break;
 		case Challenge:
 			challenge = attr;
@@ -2233,6 +2966,18 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 		l2tp_tunnel_disconnect(conn, 5, 0);
 		return -1;
 	}
+	if (recv_window_size) {
+		conn->peer_rcv_wnd_sz = recv_window_size->val.uint16;
+		if (conn->peer_rcv_wnd_sz == 0 ||
+		    conn->peer_rcv_wnd_sz > RECV_WINDOW_SIZE_MAX) {
+			log_error("impossible to handle SCCRP:"
+				  " invalid Receive Window Size %hu\n",
+				  conn->peer_rcv_wnd_sz);
+			conn->peer_rcv_wnd_sz = DEFAULT_PEER_RECV_WINDOW_SIZE;
+			l2tp_tunnel_disconnect(conn, 2, 3);
+			return -1;
+		}
+	}
 
 	if (l2tp_tunnel_checkchallresp(Message_Type_Start_Ctrl_Conn_Reply,
 				       conn, challenge_resp) < 0) {
@@ -2250,16 +2995,16 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 		return -1;
 	}
 
-	if (l2tp_tunnel_connect(conn) < 0) {
+	if (l2tp_send_SCCCN(conn) < 0) {
 		log_tunnel(log_error, conn, "impossible to handle SCCRP:"
-			   " connecting tunnel failed,"
+			   " sending SCCCN failed,"
 			   " disconnecting tunnel\n");
 		l2tp_tunnel_disconnect(conn, 2, 0);
 		return -1;
 	}
-	if (l2tp_send_SCCCN(conn) < 0) {
+	if (l2tp_tunnel_connect(conn) < 0) {
 		log_tunnel(log_error, conn, "impossible to handle SCCRP:"
-			   " sending SCCCN failed,"
+			   " connecting tunnel failed,"
 			   " disconnecting tunnel\n");
 		l2tp_tunnel_disconnect(conn, 2, 0);
 		return -1;
@@ -2268,8 +3013,6 @@ static int l2tp_recv_SCCRP(struct l2tp_conn_t *conn,
 	u_inet_ntoa(conn->host_addr.sin_addr.s_addr, host_addr);
 	log_tunnel(log_info1, conn, "established at %s:%hu\n",
 		   host_addr, ntohs(conn->host_addr.sin_port));
-
-	conn->state = STATE_ESTB;
 
 	return 0;
 }
@@ -2327,19 +3070,9 @@ static int l2tp_recv_SCCCN(struct l2tp_conn_t *conn,
 		return -1;
 	}
 
-	if (l2tp_send_ZLB(conn) < 0) {
-		log_tunnel(log_error, conn, "impossible to handle SCCCN:"
-			   " sending ZLB failed,"
-			   " disconnecting tunnel\n");
-		l2tp_tunnel_disconnect(conn, 2, 0);
-		return -1;
-	}
-
 	u_inet_ntoa(conn->host_addr.sin_addr.s_addr, host_addr);
 	log_tunnel(log_info1, conn, "established at %s:%hu\n",
 		   host_addr, ntohs(conn->host_addr.sin_port));
-
-	conn->state = STATE_ESTB;
 
 	return 0;
 }
@@ -2384,6 +3117,12 @@ static int l2tp_recv_StopCCN(struct l2tp_conn_t *conn,
 	char *err_msg = NULL;
 	uint16_t res = 0;
 	uint16_t err = 0;
+
+	if (conn->state == STATE_CLOSE || conn->state == STATE_FIN_WAIT) {
+		log_tunnel(log_warn, conn, "discarding unexpected StopCCN\n");
+
+		return 0;
+	}
 
 	log_tunnel(log_info2, conn, "handling StopCCN\n");
 
@@ -2442,8 +3181,7 @@ static int l2tp_recv_StopCCN(struct l2tp_conn_t *conn,
 	if (err_msg)
 		_free(err_msg);
 
-	if (l2tp_send_ZLB(conn) < 0)
-		log_tunnel(log_warn, conn, "acknowledging StopCCN failed\n");
+	l2tp_tunnel_finwait(conn);
 
 	return -1;
 }
@@ -2451,32 +3189,42 @@ static int l2tp_recv_StopCCN(struct l2tp_conn_t *conn,
 static int l2tp_recv_HELLO(struct l2tp_conn_t *conn,
 			   const struct l2tp_packet_t *pack)
 {
-	log_tunnel(log_debug, conn, "handling HELLO\n");
+	if (conn->state != STATE_ESTB) {
+		log_tunnel(log_warn, conn, "discarding unexpected HELLO\n");
 
-	if (l2tp_send_ZLB(conn) < 0) {
-		log_tunnel(log_error, conn, "impossible to handle HELLO:"
-			   " sending ZLB failed\n");
-		return -1;
+		return 0;
 	}
+
+	log_tunnel(log_debug, conn, "handling HELLO\n");
 
 	return 0;
 }
 
-static void l2tp_session_incall_reply(void *data)
+static int l2tp_session_incall_reply(struct l2tp_sess_t *sess)
 {
-	struct l2tp_sess_t *sess = data;
+	if (triton_timer_add(&sess->paren_conn->ctx,
+			     &sess->timeout_timer, 0) < 0) {
+		log_session(log_error, sess,
+			    "impossible to reply to incoming call:"
+			    " setting establishment timer failed\n");
+		goto err;
+	}
 
 	if (l2tp_send_ICRP(sess) < 0) {
 		log_session(log_error, sess,
 			    "impossible to reply to incoming call:"
-			    " sending ICRP failed, disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
-		return;
+			    " sending ICRP failed\n");
+		goto err_timer;
 	}
 
 	sess->state1 = STATE_WAIT_ICCN;
+
+	return 0;
+
+err_timer:
+	triton_timer_del(&sess->timeout_timer);
+err:
+	return -1;
 }
 
 static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
@@ -2570,8 +3318,7 @@ static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
 		goto out_reject;
 	}
 
-	if (l2tp_tunnel_start_session(sess, l2tp_session_incall_reply,
-				      sess) < 0) {
+	if (l2tp_session_incall_reply(sess) < 0) {
 		log_tunnel(log_error, conn, "impossible to handle ICRQ:"
 			   " starting session failed,"
 			   " disconnecting session\n");
@@ -2591,7 +3338,8 @@ out_reject:
 			   "impossible to reject ICRQ:"
 			   " sending CDN failed\n");
 	if (sess)
-		l2tp_tunnel_cancel_session(sess);
+		l2tp_session_free(sess);
+
 	return -1;
 }
 
@@ -2632,9 +3380,8 @@ static int l2tp_recv_ICRP(struct l2tp_sess_t *sess,
 		log_session(log_error, sess, "impossible to handle ICRP:"
 			    " no Assigned Session ID present in message,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 6);
+
 		return -1;
 	}
 
@@ -2649,9 +3396,8 @@ static int l2tp_recv_ICRP(struct l2tp_sess_t *sess,
 			    " unknown mandatory attribute type %i,"
 			    " disconnecting session\n",
 			    unknown_attr->attr->id);
-		if (l2tp_session_disconnect(sess, 2, 8) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 8);
+
 		return -1;
 	}
 
@@ -2659,21 +3405,17 @@ static int l2tp_recv_ICRP(struct l2tp_sess_t *sess,
 		log_session(log_error, sess, "impossible to handle ICRP:"
 			    " sending ICCN failed,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 6);
+
 		return -1;
 	}
-
-	sess->state1 = STATE_ESTB;
 
 	if (l2tp_session_connect(sess) < 0) {
 		log_session(log_error, sess, "impossible to handle ICRP:"
 			    " connecting session failed,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				"session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 6);
+
 		return -1;
 	}
 
@@ -2730,68 +3472,59 @@ static int l2tp_recv_ICCN(struct l2tp_sess_t *sess,
 			    " unknown mandatory attribute type %i,"
 			    " disconnecting session\n",
 			    unknown_attr->attr->id);
-		if (l2tp_session_disconnect(sess, 2, 8) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 8);
+
 		return -1;
 	}
-
-	sess->state1 = STATE_ESTB;
 
 	if (l2tp_session_connect(sess)) {
 		log_session(log_error, sess, "impossible to handle ICCN:"
 			    " connecting session failed,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
-		return -1;
-	}
+		l2tp_session_disconnect(sess, 2, 6);
 
-	if (l2tp_send_ZLB(sess->paren_conn) < 0) {
-		log_session(log_error, sess, "impossible to handle ICCN:"
-			    " sending ZLB failed, disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
 		return -1;
 	}
 
 	return 0;
 }
 
-static void l2tp_session_outcall_reply(void *data)
+static int l2tp_session_outcall_reply(struct l2tp_sess_t *sess)
 {
-	struct l2tp_sess_t *sess = data;
+	if (triton_timer_add(&sess->paren_conn->ctx,
+			     &sess->timeout_timer, 0) < 0) {
+		log_session(log_error, sess,
+			    "impossible to reply to outgoing call:"
+			    " setting establishment timer failed\n");
+		goto err;
+	}
 
 	if (l2tp_send_OCRP(sess) < 0) {
 		log_session(log_error, sess,
 			    "impossible to reply to outgoing call:"
-			    " sending OCRP failed, disconnecting session\n");
-		goto out_err;
+			    " sending OCRP failed\n");
+		goto err_timer;
 	}
 	if (l2tp_send_OCCN(sess) < 0) {
 		log_session(log_error, sess,
 			    "impossible to reply to outgoing call:"
-			    " sending OCCN failed, disconnecting session\n");
-		goto out_err;
+			    " sending OCCN failed\n");
+		goto err_timer;
 	}
-
-	sess->state1 = STATE_ESTB;
 
 	if (l2tp_session_connect(sess) < 0) {
 		log_session(log_error, sess,
 			    "impossible to reply to outgoing call:"
-			    " connecting session failed,"
-			    " disconnecting session\n");
-		goto out_err;
+			    " connecting session failed\n");
+		goto err_timer;
 	}
 
-	return;
+	return 0;
 
-out_err:
-	if (l2tp_session_disconnect(sess, 2, 6) < 0)
-		log_session(log_error, sess, "session disconnection failed\n");
+err_timer:
+	triton_timer_del(&sess->timeout_timer);
+err:
+	return -1;
 }
 
 static int l2tp_recv_OCRQ(struct l2tp_conn_t *conn,
@@ -2887,8 +3620,7 @@ static int l2tp_recv_OCRQ(struct l2tp_conn_t *conn,
 		goto out_cancel;
 	}
 
-	if (l2tp_tunnel_start_session(sess, l2tp_session_outcall_reply,
-				      sess) < 0) {
+	if (l2tp_session_outcall_reply(sess) < 0) {
 		log_tunnel(log_error, conn, "impossible to handle OCRQ:"
 			   " starting session failed,"
 			   " disconnecting session\n");
@@ -2908,7 +3640,8 @@ out_cancel:
 			   "impossible to reject OCRQ:"
 			   " sending CDN failed\n");
 	if (sess)
-		l2tp_tunnel_cancel_session(sess);
+		l2tp_session_free(sess);
+
 	return -1;
 }
 
@@ -2949,9 +3682,8 @@ static int l2tp_recv_OCRP(struct l2tp_sess_t *sess,
 		log_session(log_error, sess, "impossible to handle OCRP:"
 			    " no Assigned Session ID present in message,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 6);
+
 		return -1;
 	}
 
@@ -2966,9 +3698,8 @@ static int l2tp_recv_OCRP(struct l2tp_sess_t *sess,
 			    " unknown mandatory attribute type %i,"
 			    " disconnecting session\n",
 			    unknown_attr->attr->id);
-		if (l2tp_session_disconnect(sess, 2, 8) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 8);
+
 		return -1;
 	}
 
@@ -3017,30 +3748,17 @@ static int l2tp_recv_OCCN(struct l2tp_sess_t *sess,
 			    " unknown mandatory attribute type %i,"
 			    " disconnecting session\n",
 			    unknown_attr->attr->id);
-		if (l2tp_session_disconnect(sess, 2, 8) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
+		l2tp_session_disconnect(sess, 2, 8);
+
 		return -1;
 	}
-
-	sess->state1 = STATE_ESTB;
 
 	if (l2tp_session_connect(sess) < 0) {
 		log_session(log_error, sess, "impossible to handle OCCN:"
 			    " connecting session failed,"
 			    " disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
-		return -1;
-	}
+		l2tp_session_disconnect(sess, 2, 6);
 
-	if (l2tp_send_ZLB(sess->paren_conn) < 0) {
-		log_session(log_error, sess, "impossible to handle OCCN:"
-			    " sending ZLB failed, disconnecting session\n");
-		if (l2tp_session_disconnect(sess, 2, 6) < 0)
-			log_session(log_error, sess,
-				    "session disconnection failed\n");
 		return -1;
 	}
 
@@ -3056,6 +3774,12 @@ static int l2tp_recv_CDN(struct l2tp_sess_t *sess,
 	char *err_msg = NULL;
 	uint16_t res = 0;
 	uint16_t err = 0;
+
+	if (sess->state1 == STATE_CLOSE) {
+		log_session(log_warn, sess, "discarding unexpected CDN\n");
+
+		return 0;
+	}
 
 	log_session(log_info2, sess, "handling CDN\n");
 
@@ -3114,60 +3838,69 @@ static int l2tp_recv_CDN(struct l2tp_sess_t *sess,
 	if (err_msg)
 		_free(err_msg);
 
-	if (l2tp_send_ZLB(sess->paren_conn) < 0)
-		log_session(log_warn, sess, "acknowledging CDN failed\n");
+	/* Too late to send outstanding messages */
+	l2tp_session_clear_sendqueue(sess);
 
-	if (l2tp_session_free(sess) < 0) {
-		log_session(log_error, sess, "impossible to free session,"
-			    " session data have been kept\n");
-		return -1;
-	}
+	l2tp_session_free(sess);
 
 	return 0;
 }
 
-static int l2tp_recv_WEN(struct l2tp_conn_t *conn,
-			 const struct l2tp_packet_t *pack)
+static int l2tp_tunnel_recv_CDN(struct l2tp_conn_t *conn,
+				const struct l2tp_packet_t *pack)
 {
-	if (!conn->lns_mode) {
-		log_tunnel(log_warn, conn, "discarding unexpected WEN\n");
+	if (conn->state != STATE_ESTB) {
+		log_tunnel(log_warn, conn, "discarding unexpected CDN\n");
+
 		return 0;
 	}
 
-	log_tunnel(log_info2, conn, "handling WEN\n");
-
-	if (l2tp_send_ZLB(conn) < 0) {
-		log_tunnel(log_error, conn, "impossible to handle WEN:"
-			   " sending ZLB failed\n");
-		return -1;
-	}
+	log_tunnel(log_warn, conn, "discarding CDN with no Session ID:"
+		   " disconnecting sessions using Assigned Session ID is currently not supported\n");
 
 	return 0;
 }
 
-static int l2tp_recv_SLI(struct l2tp_conn_t *conn,
+static int l2tp_recv_WEN(struct l2tp_sess_t *sess,
 			 const struct l2tp_packet_t *pack)
 {
-	if (conn->lns_mode) {
-		log_tunnel(log_warn, conn, "discarding unexpected SLI\n");
+	if (sess->state1 != STATE_ESTB || !sess->paren_conn->lns_mode) {
+		log_session(log_warn, sess, "discarding unexpected WEN\n");
+
 		return 0;
 	}
 
-	log_tunnel(log_info2, conn, "handling SLI\n");
-
-	if (l2tp_send_ZLB(conn) < 0) {
-		log_tunnel(log_error, conn, "impossible to handle SLI:"
-			   " sending ZLB failed\n");
-		return -1;
-	}
+	log_session(log_info2, sess, "handling WEN\n");
 
 	return 0;
 }
 
-static void l2tp_session_place_call(void *data)
+static int l2tp_recv_SLI(struct l2tp_sess_t *sess,
+			 const struct l2tp_packet_t *pack)
 {
-	struct l2tp_sess_t *sess = data;
+	if (sess->state1 != STATE_ESTB || sess->paren_conn->lns_mode) {
+		log_session(log_warn, sess, "discarding unexpected SLI\n");
+
+		return 0;
+	}
+
+	log_session(log_info2, sess, "handling SLI\n");
+
+	return 0;
+}
+
+static int l2tp_session_place_call(struct l2tp_sess_t *sess)
+{
 	int res;
+
+	if (triton_timer_add(&sess->paren_conn->ctx,
+			     &sess->timeout_timer, 0) < 0) {
+		log_session(log_error, sess,
+			    "impossible to place %s call:"
+			    " setting establishment timer failed\n",
+			    sess->lns_mode ? "outgoing" : "incoming");
+		goto err;
+	}
 
 	if (sess->lns_mode)
 		res = l2tp_send_OCRQ(sess);
@@ -3177,17 +3910,20 @@ static void l2tp_session_place_call(void *data)
 	if (res < 0) {
 		log_session(log_error, sess,
 			    "impossible to place %s call:"
-			    " sending %cCRQ failed, freeing session\n",
+			    " sending %cCRQ failed\n",
 			    sess->lns_mode ? "outgoing" : "incoming",
 			    sess->lns_mode ? 'O' : 'I');
-		if (l2tp_session_free(sess) < 0)
-			log_session(log_error, sess,
-				    "impossible to free session,"
-				    " session data have been kept\n");
-		return;
+		goto err_timer;
 	}
 
 	sess->state1 = sess->lns_mode ? STATE_WAIT_OCRP : STATE_WAIT_ICRP;
+
+	return 0;
+
+err_timer:
+	triton_timer_del(&sess->timeout_timer);
+err:
+	return -1;
 }
 
 static void l2tp_tunnel_create_session(void *data)
@@ -3205,16 +3941,24 @@ static void l2tp_tunnel_create_session(void *data)
 	sess = l2tp_tunnel_alloc_session(conn);
 	if (sess == NULL) {
 		log_tunnel(log_error, conn, "impossible to create session:"
-			   " session allocation failed");
+			   " session allocation failed\n");
 		return;
 	}
 	sid = sess->sid;
 
-	if (l2tp_tunnel_start_session(sess,
-				      l2tp_session_place_call, sess) < 0) {
+	if (l2tp_session_place_call(sess) < 0) {
 		log_tunnel(log_error, conn, "impossible to create session:"
 			   " starting session failed\n");
-		l2tp_tunnel_cancel_session(sess);
+		l2tp_session_free(sess);
+
+		return;
+	}
+
+	if (l2tp_tunnel_push_sendqueue(conn) < 0) {
+		log_tunnel(log_error, conn, "impossible to create session:"
+			   " transmitting messages from send queue failed\n");
+		l2tp_session_free(sess);
+
 		return;
 	}
 
@@ -3222,20 +3966,21 @@ static void l2tp_tunnel_create_session(void *data)
 		   " request from command line interface\n", sid);
 }
 
-static void l2tp_session_recv(void *data)
+static void l2tp_session_recv(struct l2tp_sess_t *sess,
+			      const struct l2tp_packet_t *pack,
+			      uint16_t msg_type, int mandatory)
 {
-	struct l2tp_sess_t *sess = l2tp_session_self();
-	struct l2tp_packet_t *pack = data;
-	const struct l2tp_attr_t *msg_type = NULL;
-
-	msg_type = list_entry(pack->attrs.next, typeof(*msg_type), entry);
-
-	switch (msg_type->val.uint16) {
-	case Message_Type_Incoming_Call_Connected:
-		l2tp_recv_ICCN(sess, pack);
-		break;
-	case Message_Type_Incoming_Call_Reply:
-		l2tp_recv_ICRP(sess, pack);
+	switch (msg_type) {
+	case Message_Type_Start_Ctrl_Conn_Request:
+	case Message_Type_Start_Ctrl_Conn_Reply:
+	case Message_Type_Start_Ctrl_Conn_Connected:
+	case Message_Type_Stop_Ctrl_Conn_Notify:
+	case Message_Type_Hello:
+	case Message_Type_Outgoing_Call_Request:
+	case Message_Type_Incoming_Call_Request:
+		log_session(log_warn, sess,
+			    "discarding tunnel specific message type %hu\n",
+			    msg_type);
 		break;
 	case Message_Type_Outgoing_Call_Reply:
 		l2tp_recv_OCRP(sess, pack);
@@ -3243,47 +3988,296 @@ static void l2tp_session_recv(void *data)
 	case Message_Type_Outgoing_Call_Connected:
 		l2tp_recv_OCCN(sess, pack);
 		break;
+	case Message_Type_Incoming_Call_Reply:
+		l2tp_recv_ICRP(sess, pack);
+		break;
+	case Message_Type_Incoming_Call_Connected:
+		l2tp_recv_ICCN(sess, pack);
+		break;
 	case Message_Type_Call_Disconnect_Notify:
 		l2tp_recv_CDN(sess, pack);
 		break;
+	case Message_Type_WAN_Error_Notify:
+		l2tp_recv_WEN(sess, pack);
+		break;
+	case Message_Type_Set_Link_Info:
+		l2tp_recv_SLI(sess, pack);
+		break;
 	default:
-		if (msg_type->M) {
+		if (mandatory) {
 			log_session(log_error, sess,
-				    "impossible to handle unknown message type"
-				    " %i, disconnecting session\n",
-				    msg_type->val.uint16);
-			if (l2tp_session_disconnect(sess, 2, 8) < 0)
-				log_session(log_error, sess,
-					    "session disconnection failed\n");
-		} else
+				    "impossible to handle unknown mandatory message type %hu,"
+				    " disconnecting session\n", msg_type);
+			l2tp_session_disconnect(sess, 2, 8);
+		} else {
 			log_session(log_warn, sess,
-				    "discarding unknown message type %i\n",
-				    msg_type->val.uint16);
+				    "discarding unknown message type %hu\n",
+				    msg_type);
+		}
 		break;
 	}
+}
 
-	l2tp_packet_free(pack);
+static void l2tp_tunnel_recv(struct l2tp_conn_t *conn,
+			     const struct l2tp_packet_t *pack,
+			     uint16_t msg_type, int mandatory)
+{
+	switch (msg_type) {
+	case Message_Type_Start_Ctrl_Conn_Request:
+		log_tunnel(log_warn, conn, "discarding unexpected SCCRQ\n");
+		break;
+	case Message_Type_Start_Ctrl_Conn_Reply:
+		l2tp_recv_SCCRP(conn, pack);
+		break;
+	case Message_Type_Start_Ctrl_Conn_Connected:
+		l2tp_recv_SCCCN(conn, pack);
+		break;
+	case Message_Type_Stop_Ctrl_Conn_Notify:
+		l2tp_recv_StopCCN(conn, pack);
+		break;
+	case Message_Type_Hello:
+		l2tp_recv_HELLO(conn, pack);
+		break;
+	case Message_Type_Outgoing_Call_Request:
+		l2tp_recv_OCRQ(conn, pack);
+		break;
+	case Message_Type_Incoming_Call_Request:
+		l2tp_recv_ICRQ(conn, pack);
+		break;
+	case Message_Type_Call_Disconnect_Notify:
+		l2tp_tunnel_recv_CDN(conn, pack);
+		break;
+	case Message_Type_Outgoing_Call_Reply:
+	case Message_Type_Outgoing_Call_Connected:
+	case Message_Type_Incoming_Call_Reply:
+	case Message_Type_Incoming_Call_Connected:
+	case Message_Type_WAN_Error_Notify:
+	case Message_Type_Set_Link_Info:
+		log_tunnel(log_warn, conn,
+			   "discarding session specific message type %hu\n",
+			   msg_type);
+		break;
+	default:
+		if (mandatory) {
+			log_tunnel(log_error, conn,
+				   "impossible to handle unknown mandatory message type %hu,"
+				   " disconnecting tunnel\n", msg_type);
+			l2tp_tunnel_disconnect(conn, 2, 8);
+		} else {
+			log_tunnel(log_warn, conn,
+				   "discarding unknown message type %hu\n",
+				   msg_type);
+		}
+		break;
+	}
+}
+
+static int l2tp_tunnel_store_msg(struct l2tp_conn_t *conn,
+				 struct l2tp_packet_t *pack,
+				 int *need_ack)
+{
+	uint16_t pack_Ns = ntohs(pack->hdr.Ns);
+	uint16_t pack_Nr = ntohs(pack->hdr.Nr);
+	uint16_t indx;
+
+	/* Drop packets which acknowledge more packets than have actually
+	 * been sent.
+	 */
+	if (nsnr_cmp(conn->Ns, pack_Nr) < 0) {
+		log_tunnel(log_warn, conn,
+			   "discarding message acknowledging unsent packets"
+			   " (packet Ns/Nr: %hu/%hu, tunnel Ns/Nr: %hu/%hu)\n",
+			   pack_Ns, pack_Nr, conn->Ns, conn->Nr);
+
+		return -1;
+	}
+
+	/* Update peer Nr only when new packets are acknowledged */
+	if (nsnr_cmp(pack_Nr, conn->peer_Nr) > 0)
+		conn->peer_Nr = pack_Nr;
+
+	if (l2tp_packet_is_ZLB(pack)) {
+		log_tunnel(log_debug, conn, "handling ZLB\n");
+		if (conf_verbose) {
+			log_tunnel(log_debug, conn, "recv ");
+			l2tp_packet_print(pack, log_debug);
+		}
+
+		return -1;
+	}
+
+	/* From now on, acknowledgement has to be sent in any case:
+	 * -If the received packet is a duplicated message, the ack will
+	 *  let the peer know we received its message (in case our
+	 *  previous ack was lost).
+	 *
+	 * -If the received packet is an out of order message (whether or not
+	 *  it fits in our reception window), the ack will explicitly tell the
+	 *  peer which message number we're missing.
+	 */
+	*need_ack = 1;
+
+	/* Drop duplicate messages */
+	if (nsnr_cmp(pack_Ns, conn->Nr) < 0) {
+		log_tunnel(log_info2, conn, "handling duplicate message"
+			   " (packet Ns/Nr: %hu/%hu, tunnel Ns/Nr: %hu/%hu)\n",
+			   pack_Ns, pack_Nr, conn->Ns, conn->Nr);
+
+		return -1;
+	}
+
+	/* Drop out of order messages which don't fit in our reception queue.
+	 * This means that the peer doesn't respect our receive window, so use
+	 * log_warn.
+	 */
+	indx = pack_Ns - conn->Nr;
+	if (indx >= conn->recv_queue_sz) {
+		log_tunnel(log_warn, conn, "discarding out of order message"
+			   " (packet Ns/Nr: %hu/%hu, tunnel Ns/Nr: %hu/%hu,"
+			   " tunnel reception window size: %hu bytes)\n",
+			   pack_Ns, pack_Nr, conn->Ns, conn->Nr,
+			   conn->recv_queue_sz);
+
+		return -1;
+	}
+
+	/* Drop duplicate out of order messages */
+	indx = (indx + conn->recv_queue_offt) % conn->recv_queue_sz;
+	if (conn->recv_queue[indx]) {
+		log_tunnel(log_info2, conn,
+			   "discarding duplicate out of order message"
+			   " (packet Ns/Nr: %hu/%hu, tunnel Ns/Nr: %hu/%hu)\n",
+			   pack_Ns, pack_Nr, conn->Ns, conn->Nr);
+
+		return -1;
+	}
+
+	conn->recv_queue[indx] = pack;
+
+	return 0;
+}
+
+static int l2tp_tunnel_reply(struct l2tp_conn_t *conn, int need_ack)
+{
+	const struct l2tp_attr_t *msg_attr;
+	struct l2tp_packet_t *pack;
+	struct l2tp_sess_t *sess;
+	uint16_t msg_sid;
+	uint16_t msg_type;
+	uint16_t id = conn->recv_queue_offt;
+	unsigned int pkt_count = 0;
+	int res;
+
+	/* Loop over reception queue, break as as soon as there is no more
+	 * message to process or if tunnel gets closed.
+	 */
+	do {
+		if (conn->recv_queue[id] == NULL || conn->state == STATE_CLOSE)
+			break;
+
+		pack = conn->recv_queue[id];
+		conn->recv_queue[id] = NULL;
+		++conn->Nr;
+		++pkt_count;
+		id = (id + 1) % conn->recv_queue_sz;
+
+		/* We may receive packets even while disconnecting (e.g.
+		 * packets sent by peer before we disconnect, but received
+		 * later on, or peer retransmissions due to our acknowledgement
+		 * getting lost).
+		 * We don't have to process these messages, but we still
+		 * dequeue them all to send proper acknowledgement (to avoid
+		 * useless retransmissions from peer). Log with log_info2 since
+		 * there's nothing wrong with receiving messages at this stage.
+		 */
+		if (conn->state == STATE_FIN ||
+		    conn->state == STATE_FIN_WAIT) {
+			log_tunnel(log_info2, conn,
+				   "discarding message received while disconnecting\n");
+			l2tp_packet_free(pack);
+			continue;
+		}
+
+		/* ZLB aren't stored in the reception queue, so we're sure that
+		 * pack->attrs isn't an empty list.
+		 */
+		msg_attr = list_first_entry(&pack->attrs, typeof(*msg_attr),
+					    entry);
+		if (msg_attr->attr->id != Message_Type) {
+			log_tunnel(log_warn, conn,
+				   "discarding message with invalid first attribute type %hu\n",
+				   msg_attr->attr->id);
+			l2tp_packet_free(pack);
+			continue;
+		}
+		msg_type = msg_attr->val.uint16;
+
+		if (conf_verbose) {
+			if (msg_type == Message_Type_Hello) {
+				log_tunnel(log_debug, conn, "recv ");
+				l2tp_packet_print(pack, log_debug);
+			} else {
+				log_tunnel(log_info2, conn, "recv ");
+				l2tp_packet_print(pack, log_info2);
+			}
+		}
+
+		msg_sid = ntohs(pack->hdr.sid);
+		if (msg_sid) {
+			sess = l2tp_tunnel_get_session(conn, msg_sid);
+			if (sess == NULL) {
+				log_tunnel(log_warn, conn,
+					   "discarding message with invalid Session ID %hu\n",
+					   msg_sid);
+				l2tp_packet_free(pack);
+				continue;
+			}
+			l2tp_session_recv(sess, pack, msg_type, msg_attr->M);
+		} else {
+			l2tp_tunnel_recv(conn, pack, msg_type, msg_attr->M);
+		}
+
+		l2tp_packet_free(pack);
+	} while (id != conn->recv_queue_offt);
+
+	conn->recv_queue_offt = (conn->recv_queue_offt + pkt_count) % conn->recv_queue_sz;
+
+	log_tunnel(log_debug, conn,
+		   "%u message%s processed from reception queue\n",
+		   pkt_count, pkt_count > 1 ? "s" : "");
+
+	res = l2tp_tunnel_push_sendqueue(conn);
+	if (res == 0 && need_ack)
+		res = l2tp_send_ZLB(conn);
+
+	return res;
 }
 
 static int l2tp_conn_read(struct triton_md_handler_t *h)
 {
 	struct l2tp_conn_t *conn = container_of(h, typeof(*conn), hnd);
-	struct l2tp_sess_t *sess = NULL;
-	struct l2tp_packet_t *pack, *p;
-	const struct l2tp_attr_t *msg_type;
+	struct l2tp_packet_t *pack;
+	unsigned int pkt_count = 0;
+	int need_ack = 0;
 	int res;
+
+	/* Hold the tunnel. This allows any function we call to free the
+	 * tunnel while still keeping the tunnel valid until we return.
+	 */
+	tunnel_hold(conn);
 
 	while (1) {
 		res = l2tp_recv(h->fd, &pack, NULL,
-				conf_secret, conf_secret_len);
+				conn->secret, conn->secret_len);
 		if (res) {
 			if (res == -2) {
 				log_tunnel(log_info1, conn,
 					   "peer is unreachable,"
 					   " disconnecting tunnel\n");
-				l2tp_tunnel_free(conn);
+				goto err_tunfree;
 			}
-			return 0;
+
+			break;
 		}
 
 		if (!pack)
@@ -3301,7 +4295,8 @@ static int l2tp_conn_read(struct triton_md_handler_t *h)
 				log_tunnel(log_error, conn,
 					   "peer port update failed,"
 					   " disconnecting tunnel\n");
-				goto drop;
+				l2tp_packet_free(pack);
+				goto err_tunfree;
 			}
 			conn->port_set = 1;
 		}
@@ -3314,162 +4309,55 @@ static int l2tp_conn_read(struct triton_md_handler_t *h)
 			continue;
 		}
 
-		res = nsnr_cmp(ntohs(pack->hdr.Ns), conn->Nr);
-		if (res < 0) {
-			/* Duplicate message */
-			log_tunnel(log_info2, conn,
-				   "handling duplicate message (packet Ns/Nr:"
-				   " %hu/%hu, tunnel Ns/Nr: %hu/%hu)\n",
-				   ntohs(pack->hdr.Ns), ntohs(pack->hdr.Nr),
-				   conn->Ns, conn->Nr);
-			if (!list_empty(&conn->send_queue))
-				res = l2tp_retransmit(conn);
-			else
-				res = l2tp_send_ZLB(conn);
-			if (res < 0)
-				log_tunnel(log_warn, conn,
-					   "replying to duplicate message"
-					   " failed, continuing anyway\n");
-			l2tp_packet_free(pack);
-			continue;
-		} else if (res > 0) {
-			/* Out of order message */
-			log_tunnel(log_info2, conn,
-				   "discarding reordered message (packet Ns/Nr:"
-				   " %hu/%hu, tunnel Ns/Nr: %hu/%hu)\n",
-				   ntohs(pack->hdr.Ns), ntohs(pack->hdr.Nr),
-				   conn->Ns, conn->Nr);
-			l2tp_packet_free(pack);
-			continue;
-		} else {
-			if (!list_empty(&pack->attrs))
-				conn->Nr++;
-			while (!list_empty(&conn->send_queue)) {
-				/* Flush retransmission queue up
-				   to the last acknowledged message */
-				p = list_entry(conn->send_queue.next,
-					       typeof(*pack), entry);
-				if (nsnr_cmp(ntohs(p->hdr.Ns),
-					     ntohs(pack->hdr.Nr)) >= 0)
-					break;
-				list_del(&p->entry);
-				l2tp_packet_free(p);
-				conn->retransmit = 0;
-			}
-			if (!list_empty(&conn->send_queue))
-				triton_timer_mod(&conn->rtimeout_timer, 0);
-			else {
-				if (conn->rtimeout_timer.tpd)
-					triton_timer_del(&conn->rtimeout_timer);
-				if (conn->state == STATE_FIN)
-					goto drop;
-			}
-		}
-
-		if (list_empty(&pack->attrs)) {
-			log_tunnel(log_debug, conn, "handling ZLB\n");
-			if (conf_verbose) {
-				log_tunnel(log_debug, conn, "recv ");
-				l2tp_packet_print(pack, log_debug);
-			}
+		if (l2tp_tunnel_store_msg(conn, pack, &need_ack) < 0) {
 			l2tp_packet_free(pack);
 			continue;
 		}
 
-		msg_type = list_entry(pack->attrs.next, typeof(*msg_type), entry);
-
-		if (msg_type->attr->id != Message_Type) {
-			log_tunnel(log_warn, conn,
-				   "discarding message with invalid first"
-				   " attribute type %i\n", msg_type->attr->id);
-			l2tp_packet_free(pack);
-			continue;
-		}
-
-		if (conf_verbose) {
-			if (msg_type->val.uint16 == Message_Type_Hello) {
-				log_tunnel(log_debug, conn, "recv ");
-				l2tp_packet_print(pack, log_debug);
-			} else {
-				log_tunnel(log_info2, conn, "recv ");
-				l2tp_packet_print(pack, log_info2);
-			}
-		}
-
-		switch (msg_type->val.uint16) {
-			case Message_Type_Start_Ctrl_Conn_Reply:
-				if (l2tp_recv_SCCRP(conn, pack))
-					goto drop;
-				break;
-			case Message_Type_Start_Ctrl_Conn_Connected:
-				if (l2tp_recv_SCCCN(conn, pack))
-					goto drop;
-				break;
-			case Message_Type_Stop_Ctrl_Conn_Notify:
-				l2tp_recv_StopCCN(conn, pack);
-				goto drop;
-			case Message_Type_Hello:
-				l2tp_recv_HELLO(conn, pack);
-				break;
-			case Message_Type_Incoming_Call_Request:
-				l2tp_recv_ICRQ(conn, pack);
-				break;
-			case Message_Type_Outgoing_Call_Request:
-				l2tp_recv_OCRQ(conn, pack);
-				break;
-			case Message_Type_Incoming_Call_Connected:
-			case Message_Type_Incoming_Call_Reply:
-			case Message_Type_Outgoing_Call_Reply:
-			case Message_Type_Outgoing_Call_Connected:
-			case Message_Type_Call_Disconnect_Notify:
-				sess = l2tp_tunnel_get_session(conn, ntohs(pack->hdr.sid));
-				if (sess == NULL) {
-					log_tunnel(log_warn, conn,
-						   "discarding message with"
-						   " invalid sid %hu\n",
-						   ntohs(pack->hdr.sid));
-					l2tp_packet_free(pack);
-					continue;
-				}
-				if (triton_context_call(&sess->sctx, l2tp_session_recv, pack) < 0) {
-					log_tunnel(log_warn, conn,
-						   "impossible to handle message for session %hu:"
-						   " call to child session failed\n",
-						   sess->sid);
-					l2tp_packet_free(pack);
-				}
-				continue;
-			case Message_Type_WAN_Error_Notify:
-				l2tp_recv_WEN(conn, pack);
-				break;
-			case Message_Type_Set_Link_Info:
-				l2tp_recv_SLI(conn, pack);
-				break;
-			case Message_Type_Start_Ctrl_Conn_Request:
-				log_tunnel(log_warn, conn,
-					   "discarding unexpected SCCRQ\n");
-				break;
-			default:
-				if (msg_type->M) {
-					log_tunnel(log_error, conn,
-						   "impossible to handle unknown message type"
-						   " %i, disconnecting tunnel\n",
-						   msg_type->val.uint16);
-					l2tp_tunnel_disconnect(conn, 2, 8);
-					goto drop;
-				} else
-					log_tunnel(log_warn, conn,
-						   "discarding unknown message type %i\n",
-						   msg_type->val.uint16);
-				break;
-		}
-
-		l2tp_packet_free(pack);
+		++pkt_count;
 	}
 
-drop:
-	l2tp_packet_free(pack);
+	log_tunnel(log_debug, conn, "%u message%s added to reception queue\n",
+		   pkt_count, pkt_count > 1 ? "s" : "");
+
+	/* Drop acknowledged packets from retransmission queue */
+	if (l2tp_tunnel_clean_rtmsqueue(conn) < 0) {
+		log_tunnel(log_error, conn,
+			   "impossible to handle incoming message:"
+			   " cleaning retransmission queue failed,"
+			   " deleting tunnel\n");
+		goto err_tunfree;
+	}
+
+	if (l2tp_tunnel_reply(conn, need_ack) < 0) {
+		log_tunnel(log_error, conn,
+			   "impossible to reply to incoming messages:"
+			   " message transmission failed,"
+			   " deleting tunnel\n");
+		goto err_tunfree;
+	}
+
+	if (conn->state == STATE_FIN && list_empty(&conn->send_queue) &&
+	    list_empty(&conn->rtms_queue)) {
+		log_tunnel(log_info2, conn,
+			   "tunnel disconnection acknowledged by peer,"
+			   " deleting tunnel\n");
+		goto err_tunfree;
+	}
+
+	/* Use conn->state to detect tunnel deletion */
+	if (conn->state == STATE_CLOSE)
+		goto err;
+
+	tunnel_put(conn);
+
+	return 0;
+
+err_tunfree:
 	l2tp_tunnel_free(conn);
+err:
+	tunnel_put(conn);
+
 	return -1;
 }
 
@@ -3675,8 +4563,20 @@ err_fd:
 static int show_stat_exec(const char *cmd, char * const *fields, int fields_cnt, void *client)
 {
 	cli_send(client, "l2tp:\r\n");
-	cli_sendv(client, "  starting: %u\r\n", stat_starting);
-	cli_sendv(client, "  active: %u\r\n", stat_active);
+	cli_send(client, "  tunnels:\r\n");
+	cli_sendv(client, "    starting: %u\r\n", stat_conn_starting);
+	cli_sendv(client, "    active: %u\r\n", stat_conn_active);
+	cli_sendv(client, "    finishing: %u\r\n", stat_conn_finishing);
+
+	cli_send(client, "  sessions (control channels):\r\n");
+	cli_sendv(client, "    starting: %u\r\n", stat_sess_starting);
+	cli_sendv(client, "    active: %u\r\n", stat_sess_active);
+	cli_sendv(client, "    finishing: %u\r\n", stat_sess_finishing);
+
+	cli_send(client, "  sessions (data channels):\r\n");
+	cli_sendv(client, "    starting: %u\r\n", stat_starting);
+	cli_sendv(client, "    active: %u\r\n", stat_active);
+	cli_sendv(client, "    finishing: %u\r\n", stat_finishing);
 
 	return CLI_CMD_OK;
 }
@@ -3696,6 +4596,7 @@ static int l2tp_create_tunnel_exec(const char *cmd, char * const *fields,
 		.sin_addr = { htonl(INADDR_ANY) }
 	};
 	const char *opt = NULL;
+	const char *secret = conf_secret;
 	int peer_indx = -1;
 	int host_indx = -1;
 	int lns_mode = 0;
@@ -3763,6 +4664,9 @@ static int l2tp_create_tunnel_exec(const char *cmd, char * const *fields,
 		} else if (strcmp("hide-avps", fields[indx]) == 0) {
 			++indx;
 			hide_avps = atoi(fields[indx]) > 0;
+		} else if (strcmp("secret", fields[indx]) == 0) {
+			++indx;
+			secret = fields[indx];
 		} else {
 			cli_sendv(client, "invalid option: \"%s\"\r\n",
 				  fields[indx]);
@@ -3771,12 +4675,12 @@ static int l2tp_create_tunnel_exec(const char *cmd, char * const *fields,
 	}
 
 	if (indx != fields_cnt) {
-		cli_sendv(client, "argument missing for last option\r\n");
+		cli_send(client, "argument missing for last option\r\n");
 		return CLI_CMD_SYNTAX;
 	}
 
 	if (peer_indx < 0) {
-		cli_sendv(client, "missing option \"peer-addr\"\r\n");
+		cli_send(client, "missing option \"peer-addr\"\r\n");
 		return CLI_CMD_SYNTAX;
 	}
 
@@ -3786,6 +4690,16 @@ static int l2tp_create_tunnel_exec(const char *cmd, char * const *fields,
 		return CLI_CMD_FAILED;
 	}
 	tid = conn->tid;
+
+	if (secret) {
+		conn->secret = _strdup(secret);
+		if (conn->secret == NULL) {
+			cli_send(client, "secret allocation failed\r\n");
+			l2tp_tunnel_free(conn);
+			return CLI_CMD_FAILED;
+		}
+		conn->secret_len = strlen(conn->secret);
+	}
 
 	if (l2tp_tunnel_start(conn, l2tp_send_SCCRQ, &peer) < 0) {
 		cli_send(client, "starting tunnel failed\r\n");
@@ -3819,7 +4733,7 @@ static int l2tp_create_session_exec(const char *cmd, char * const *fields,
 		return CLI_CMD_SYNTAX;
 	}
 
-	if (u_readlong(&tid, fields[4], 1, L2TP_MAX_TID - 1) < 0) {
+	if (u_readlong(&tid, fields[4], 1, UINT16_MAX) < 0) {
 		cli_sendv(client, "invalid Tunnel ID: \"%s\"\r\n", fields[4]);
 		return CLI_CMD_INVAL;
 	}
@@ -3849,10 +4763,15 @@ static void l2tp_create_tunnel_help(char * const *fields, int fields_cnt,
 				    void *client)
 {
 	cli_send(client,
-		 "l2tp create tunnel peer-addr <ip_addr> [peer-port <port>]"
-		 " [host-addr <ip_addr>] [host-port <port>]"
-		 " [hide-avps <0|1>] [mode <lac|lns>]"
-		 " - initiate new tunnel to peer\r\n");
+		 "l2tp create tunnel peer-addr <ip_addr> [OPTIONS...]"
+		 " - initiate new tunnel to peer\r\n"
+		 "\tOPTIONS:\r\n"
+		 "\t\tpeer-port <port> - destination port (default 1701)\r\n"
+		 "\t\thost-addr <ip_addr> - source address\r\n"
+		 "\t\thost-port <port> - source port\r\n"
+		 "\t\tsecret <secret> - tunnel secret\r\n"
+		 "\t\thide-avps <0|1> - activation of AVP hiding\r\n"
+		 "\t\tmode <lac|lns> - tunnel mode\r\n");
 }
 
 static void l2tp_create_session_help(char * const *fields, int fields_cnt,
@@ -3916,10 +4835,32 @@ static void load_config(void)
 	opt = conf_get_opt("l2tp", "rtimeout");
 	if (opt && atoi(opt) > 0)
 		conf_rtimeout = atoi(opt);
+	else
+		conf_rtimeout = DEFAULT_RTIMEOUT;
+
+	opt = conf_get_opt("l2tp", "rtimeout-cap");
+	if (opt && atoi(opt) > 0)
+		conf_rtimeout_cap = atoi(opt);
+	else
+		conf_rtimeout_cap = DEFAULT_RTIMEOUT_CAP;
+	if (conf_rtimeout_cap < conf_rtimeout) {
+		log_warn("l2tp: rtimeout-cap (%i) is smaller than rtimeout (%i),"
+			 " resetting rtimeout-cap to %i\n",
+			 conf_rtimeout_cap, conf_rtimeout, conf_rtimeout);
+		conf_rtimeout_cap = conf_rtimeout;
+	}
 
 	opt = conf_get_opt("l2tp", "retransmit");
 	if (opt && atoi(opt) > 0)
 		conf_retransmit = atoi(opt);
+	else
+		conf_retransmit = DEFAULT_RETRANSMIT;
+
+	opt = conf_get_opt("l2tp", "recv-window");
+	if (opt && atoi(opt) > 0 && atoi(opt) <= RECV_WINDOW_SIZE_MAX)
+		conf_recv_window = atoi(opt);
+	else
+		conf_recv_window = DEFAULT_RECV_WINDOW;
 
 	opt = conf_get_opt("l2tp", "ppp-max-mtu");
 	if (opt && atoi(opt) > 0)
@@ -3937,6 +4878,9 @@ static void load_config(void)
 	if (opt) {
 		conf_secret = opt;
 		conf_secret_len = strlen(opt);
+	} else {
+		conf_secret = NULL;
+		conf_secret_len = 0;
 	}
 
 	opt = conf_get_opt("l2tp", "dir300_quirk");
@@ -3961,11 +4905,16 @@ static void load_config(void)
 
 static void l2tp_init(void)
 {
-	if (system("modprobe -q pppol2tp || modprobe -q l2tp_ppp"))
+	int fd;
+
+	fd = socket(AF_PPPOX, SOCK_DGRAM, PX_PROTO_OL2TP);
+	if (fd >= 0)
+		close(fd);
+	else if (system("modprobe -q pppol2tp || modprobe -q l2tp_ppp"))
 		log_warn("unable to load l2tp kernel module\n");
 
-	l2tp_conn = _malloc(L2TP_MAX_TID * sizeof(void *));
-	memset(l2tp_conn, 0, L2TP_MAX_TID * sizeof(void *));
+	l2tp_conn = _malloc((UINT16_MAX + 1) * sizeof(struct l2tp_conn_t *));
+	memset(l2tp_conn, 0, (UINT16_MAX + 1) * sizeof(struct l2tp_conn_t *));
 
 	l2tp_conn_pool = mempool_create(sizeof(struct l2tp_conn_t));
 	l2tp_sess_pool = mempool_create(sizeof(struct l2tp_sess_t));
