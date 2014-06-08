@@ -9,13 +9,13 @@ IMPORTS
 ;
 
 accelPPP MODULE-IDENTITY
-    LAST-UPDATED "201108180000Z"
+    LAST-UPDATED "201404141435Z"
     ORGANIZATION "accel-ppp.sourceforge.net"
     CONTACT-INFO    
           "email:    xeb@mail.ru"
     DESCRIPTION
 	"MIB objects for accel-ppp"
-    REVISION     "201108180000Z"
+    REVISION     "201404141435Z"
     DESCRIPTION
 	"First draft"
     ::= { netSnmp 100 }
@@ -33,7 +33,7 @@ statPPP           OBJECT IDENTIFIER ::= { accelPPPStat 2 }
 statPPTP          OBJECT IDENTIFIER ::= { accelPPPStat 3 }
 statL2TP          OBJECT IDENTIFIER ::= { accelPPPStat 4 }
 statPPPOE         OBJECT IDENTIFIER ::= { accelPPPStat 5 }
---statRadius        OBJECT IDENTIFIER ::= { accelPPPStat 6 }
+statRadius        OBJECT IDENTIFIER ::= { accelPPPStat 6 }
 
 
 statCoreUpTime OBJECT-TYPE
@@ -155,6 +155,223 @@ statPPPOEActive OBJECT-TYPE
 			"count of active connections"
     ::= { statPPPOE 2 }
 
+
+--
+-- RADIUS stats table
+--
+
+radiusStatsTable OBJECT-TYPE
+    SYNTAX     SEQUENCE OF radiusStatsEntry
+    MAX-ACCESS not-accessible
+    STATUS     current
+    DESCRIPTION
+			"this table contains information about
+			RADIUS servers"
+    ::= { statRadius 1 }
+
+radiusStatsEntry OBJECT-TYPE
+    SYNTAX      radiusStatsEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION
+			"A row describing a given RADIUS server"
+    INDEX       { radID }
+    ::= { radiusStatsTable 1 }
+
+radiusStatsEntry ::= SEQUENCE {
+	radID           OCTET STRING,
+	radAddress      InetAddress,
+	radPortAuth     INTEGER,
+	radPortAcct     INTEGER,
+	radQueueCount   INTEGER,
+	radFailCount    INTEGER,
+	radAuthSent     INTEGER,
+	radAuthLost     INTEGER,
+	radAcctSent     INTEGER,
+	radAcctLost     INTEGER,
+	radInterSent    INTEGER,
+	radInterLost    INTEGER,
+	radAuthLost1m   INTEGER,
+	radAuthLost5m   INTEGER,
+	radAcctLost1m   INTEGER,
+	radAcctLost5m   INTEGER,
+	radInterLost1m  INTEGER,
+	radInterLost5m  INTEGER,
+	radAuthTime1m   INTEGER,
+	radAuthTime5m   INTEGER,
+	radAcctTime1m   INTEGER,
+	radAcctTime5m   INTEGER,
+	radInterTime1m  INTEGER,
+	radInterTime5m  INTEGER
+}
+
+radID OBJECT-TYPE
+    SYNTAX OCTET STRING (SIZE(16))
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "RADIUS server identifier"
+    ::= { radiusStatsEntry 1 }
+
+radAddress OBJECT-TYPE
+    SYNTAX InetAddressIPv4
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "RADIUS server address"
+    ::= { radiusStatsEntry 2 }
+
+radPortAuth OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "RADIUS server auth port"
+    ::= { radiusStatsEntry 3 }
+
+radPortAcct OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "RADIUS server accounting port"
+    ::= { radiusStatsEntry 4 }
+
+radQueueCount OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Requests in server queue"
+    ::= { radiusStatsEntry 5 }
+
+radFailCount OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Number of server failures"
+    ::= { radiusStatsEntry 6 }
+
+radAuthSent OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Auth requests sent"
+    ::= { radiusStatsEntry 7 }
+
+radAuthLost OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Auth requests lost"
+    ::= { radiusStatsEntry 8 }
+
+radAcctSent OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Accounting requests sent"
+    ::= { radiusStatsEntry 9 }
+
+radAcctLost OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Accounting requests lost"
+    ::= { radiusStatsEntry 10 }
+
+radInterSent OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Interim accounting requests sent"
+    ::= { radiusStatsEntry 11 }
+
+radInterLost OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Interim accounting requests lost"
+    ::= { radiusStatsEntry 12 }
+
+radAuthLost1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Auth requests lost in last 1 minute"
+    ::= { radiusStatsEntry 13 }
+
+radAuthLost5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Auth requests lost in last 5 minutes"
+    ::= { radiusStatsEntry 14 }
+
+radAcctLost1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Accounting requests lost in last 1 minute"
+    ::= { radiusStatsEntry 15 }
+
+radAcctLost5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Accounting requests lost in last 5 minutes"
+    ::= { radiusStatsEntry 16 }
+
+radInterLost1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Interim accounting requests lost in last 1 minute"
+    ::= { radiusStatsEntry 17 }
+
+radInterLost5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Interim accounting requests lost in last 5 minutes"
+    ::= { radiusStatsEntry 18 }
+
+radAuthTime1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average auth requests duration in last 1 minute"
+    ::= { radiusStatsEntry 19 }
+
+radAuthTime5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average auth requests duration in last 5 minutes"
+    ::= { radiusStatsEntry 20 }
+
+radAcctTime1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average accounting requests duration in last 1 minute"
+    ::= { radiusStatsEntry 21 }
+
+radAcctTime5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average accounting requests duration in last 5 minutes"
+    ::= { radiusStatsEntry 22 }
+
+radInterTime1m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average interim accounting requests duration in last 1 minute"
+    ::= { radiusStatsEntry 23 }
+
+radInterTime5m OBJECT-TYPE
+    SYNTAX INTEGER
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION "Average interim accounting requests duration in last 5 minutes"
+    ::= { radiusStatsEntry 24 }
 
 --
 -- PPP session table

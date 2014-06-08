@@ -19,6 +19,10 @@
 #include "sessionTable.h"
 #include "exec_cli.h"
 
+#ifdef RADIUS
+#include "radiusStatsTable.h"
+#endif
+
 static const char *conf_agent_name = "accel-ppp";
 static int conf_master = 0;
 /*static const char *conf_oid_prefix = "1.3.6.1.4.1.8072.100";
@@ -99,6 +103,9 @@ static int snmp_thread(void *a)
 	init_terminate();
 	init_shutdown();
 	init_sessionTable();
+#ifdef RADIUS
+	init_radiusStatsTable();
+#endif
 	init_cli();
 
 	init_snmp(conf_agent_name);

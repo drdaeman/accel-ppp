@@ -110,6 +110,40 @@ struct rad_dm_coa_req_t
 	int res;
 };
 
+struct rad_server_stat_t
+{
+	struct list_head entry;
+
+	int id;
+	in_addr_t addr;
+	int auth_port;
+	int acct_port;
+	unsigned int queue_cnt;
+
+	unsigned long stat_auth_sent;
+	unsigned long stat_auth_lost;
+	unsigned long stat_acct_sent;
+	unsigned long stat_acct_lost;
+	unsigned long stat_interim_sent;
+	unsigned long stat_interim_lost;
+	unsigned long stat_fail_cnt;
+
+	unsigned long stat_auth_lost_1m;
+	unsigned long stat_auth_lost_5m;
+	unsigned long stat_auth_query_1m;
+	unsigned long stat_auth_query_5m;
+
+	unsigned long stat_acct_lost_1m;
+	unsigned long stat_acct_lost_5m;
+	unsigned long stat_acct_query_1m;
+	unsigned long stat_acct_query_5m;
+
+	unsigned long stat_interim_lost_1m;
+	unsigned long stat_interim_lost_5m;
+	unsigned long stat_interim_query_1m;
+	unsigned long stat_interim_query_5m;
+};
+
 struct ppp_t;
 
 void rad_register_plugin(struct ppp_t *, struct rad_plugin_t *);
@@ -133,6 +167,8 @@ int rad_packet_change_octets(struct rad_packet_t *pack, const char *vendor, cons
 int rad_packet_add_ipaddr(struct rad_packet_t *pack, const char *vendor, const char *name, in_addr_t ipaddr);
 int rad_packet_add_ifid(struct rad_packet_t *pack, const char *vendor, const char *name, uint64_t ifid);
 int rad_packet_add_ipv6prefix(struct rad_packet_t *pack, const char *vendor, const char *name, struct in6_addr *prefix, int len);
+
+int rad_server_stats(struct list_head *stat);
 
 #endif
 
