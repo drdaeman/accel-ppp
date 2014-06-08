@@ -1,3 +1,10 @@
+accel-ppp (1.7.4-1alphacom1) precise; urgency=low
+
+  * Upstream release 1.7.4 git 52e45125 (with Alphacom custom patches)
+  * Now depending on libnl-3-200 instead of unmaintained libnl2
+
+ -- Aleksey Zhukov <drdaeman@drdaeman.pp.ru>  Sun, 08 Jun 2014 18:25:30 +0400
+
 accel-ppp (1.7.3-1alphacom6) precise; urgency=low
 
   * Upstream release 1.7.3+ git da7bb06e (with Alphacom custom patches)
