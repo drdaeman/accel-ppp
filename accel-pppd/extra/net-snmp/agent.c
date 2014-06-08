@@ -1,5 +1,9 @@
+#include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <sys/wait.h>
+#include <string.h>
 
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
@@ -18,6 +22,10 @@
 #include "sessionTable.h"
 #include "exec_cli.h"
 
+#ifdef RADIUS
+#include "radiusStatsTable.h"
+#endif
+
 static const char *conf_agent_name = "accel-ppp";
 static int conf_master = 0;
 /*static const char *conf_oid_prefix = "1.3.6.1.4.1.8072.100";
@@ -25,8 +33,8 @@ static int conf_master = 0;
 static oid* oid_prefix;
 static size_t oid_prefix_size;*/
 
-static pthread_t snmp_thr;
 static int snmp_term = 0;
+static int snmp_pid;
 
 /*int accel_ppp_alloc_oid(oid tail, size_t size, oid **oid)
 {
@@ -69,7 +77,7 @@ static int agent_log(int major, int minor, void *serv_arg, void *cl_arg)
 	return 0;
 }
 
-static void *snmp_thread(void *a)
+static int snmp_thread(void *a)
 {
 	sigset_t set;
 
@@ -78,6 +86,14 @@ static void *snmp_thread(void *a)
 	sigdelset(&set, SIGSTOP);
 	sigdelset(&set, 32);
 	pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+	if (unshare(CLONE_FILES) < 0) {
+		log_error("net-snmp: impossible to start SNMP thread:"
+			  " unshare(CLONE_FILES) failed (%s)\n",
+			  strerror(errno));
+
+		return NULL;
+	}
 
 	snmp_register_callback(SNMP_CALLBACK_LIBRARY, SNMP_CALLBACK_LOGGING, agent_log, NULL);
   snmp_disable_log();
@@ -98,6 +114,9 @@ static void *snmp_thread(void *a)
 	init_terminate();
 	init_shutdown();
 	init_sessionTable();
+#ifdef RADIUS
+	init_radiusStatsTable();
+#endif
 	init_cli();
 
 	init_snmp(conf_agent_name);
@@ -105,22 +124,22 @@ static void *snmp_thread(void *a)
 	if (conf_master)
 		init_master_agent();
 	
-	while (!snmp_term) {
+	while (!snmp_term)
     agent_check_and_process(1);
-	}
 	
 	snmp_shutdown(conf_agent_name);
 
   SOCK_CLEANUP;
 
-	return NULL;
+	return 0;
 }
 
 static void snmp_ctx_close(struct triton_context_t *ctx)
 {
+	int status;
 	snmp_term = 1;
-	pthread_cancel(snmp_thr);
-	pthread_join(snmp_thr, NULL);
+	kill(snmp_pid, 32);
+	waitpid(snmp_pid, &status, 0);
 	triton_context_unregister(ctx);
 }
 
@@ -144,7 +163,8 @@ static void init(void)
 	if (opt)
 		conf_oid_prefix = opt;*/
 	
-	pthread_create(&snmp_thr, NULL, snmp_thread, NULL);
+	snmp_pid = clone(snmp_thread, malloc(1024*1024) + 1024*1024, CLONE_SIGHAND|CLONE_FS|CLONE_VM|CLONE_THREAD, NULL);
+	
 	triton_context_register(&ctx, NULL);
 	triton_context_wakeup(&ctx);
 	triton_collect_cpu_usage();

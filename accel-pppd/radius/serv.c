@@ -268,6 +268,52 @@ static int show_stat_exec(const char *cmd, char * const *fields, int fields_cnt,
 	return CLI_CMD_OK;
 }
 
+void fill_stat(struct rad_server_t *s, struct rad_server_stat_t *st)
+{
+	st->id = s->id;
+	st->addr = s->addr;
+	st->auth_port = s->auth_port;
+	st->acct_port = s->acct_port;
+	st->queue_cnt = s->queue_cnt;
+
+	st->stat_auth_sent = s->stat_auth_sent;
+	st->stat_auth_lost = s->stat_auth_lost;
+	st->stat_acct_sent = s->stat_acct_sent;
+	st->stat_acct_lost = s->stat_acct_lost;
+	st->stat_interim_sent = s->stat_interim_sent;
+	st->stat_interim_lost = s->stat_interim_lost;
+	st->stat_fail_cnt = s->stat_fail_cnt;
+
+	st->stat_auth_lost_1m = stat_accm_get_cnt(s->stat_auth_lost_1m);
+	st->stat_auth_lost_5m = stat_accm_get_cnt(s->stat_auth_lost_5m);
+	st->stat_auth_query_1m = stat_accm_get_avg(s->stat_auth_query_1m);
+	st->stat_auth_query_5m = stat_accm_get_avg(s->stat_auth_query_5m);
+
+	st->stat_acct_lost_1m = stat_accm_get_cnt(s->stat_acct_lost_1m);
+	st->stat_acct_lost_5m = stat_accm_get_cnt(s->stat_acct_lost_5m);
+	st->stat_acct_query_1m = stat_accm_get_avg(s->stat_acct_query_1m);
+	st->stat_acct_query_5m = stat_accm_get_avg(s->stat_acct_query_5m);
+
+	st->stat_interim_lost_1m = stat_accm_get_cnt(s->stat_interim_lost_1m);
+	st->stat_interim_lost_5m = stat_accm_get_cnt(s->stat_interim_lost_5m);
+	st->stat_interim_query_1m = stat_accm_get_avg(s->stat_interim_query_1m);
+	st->stat_interim_query_5m = stat_accm_get_avg(s->stat_interim_query_5m);
+}
+
+int __export rad_server_stats(struct list_head *stat)
+{
+	struct rad_server_t *s;
+	struct rad_server_stat_t *st;
+
+	list_for_each_entry(s, &serv_list, entry) {
+		st = _malloc(sizeof(*st));
+		memset(st, 0, sizeof(*st));
+		fill_stat(s, st);
+		list_add_tail(&st->entry, stat);
+	}
+	return 0;
+}
+
 static void __add_server(struct rad_server_t *s)
 {
 	struct rad_server_t *s1;

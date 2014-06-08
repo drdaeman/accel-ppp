@@ -13,6 +13,7 @@ SET(sources
 	terminate.c
 	shutdown.c
 	exec_cli.c
+	radiusStatsTable.c
 )
 
 ADD_LIBRARY(net-snmp SHARED ${sources})
