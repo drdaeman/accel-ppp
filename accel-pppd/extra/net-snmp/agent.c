@@ -1,6 +1,9 @@
+#include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <string.h>
 
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
@@ -83,6 +86,14 @@ static int snmp_thread(void *a)
 	sigdelset(&set, SIGSTOP);
 	sigdelset(&set, 32);
 	pthread_sigmask(SIG_BLOCK, &set, NULL);
+
+	if (unshare(CLONE_FILES) < 0) {
+		log_error("net-snmp: impossible to start SNMP thread:"
+			  " unshare(CLONE_FILES) failed (%s)\n",
+			  strerror(errno));
+
+		return NULL;
+	}
 
 	snmp_register_callback(SNMP_CALLBACK_LIBRARY, SNMP_CALLBACK_LOGGING, agent_log, NULL);
   snmp_disable_log();

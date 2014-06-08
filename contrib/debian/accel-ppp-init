@@ -20,13 +20,13 @@ CONFFILE="/etc/accel-ppp.conf"
 test -x "$DAEMON" || exit 0
 . /lib/lsb/init-functions
 
-ACCEL_PPPD_OPTS="-c $CONFFILE"
+ACCEL_PPPD_OPTS="-c ${CONFFILE}"
 [ -r /etc/default/accel-ppp ] && . /etc/default/accel-ppp
 
-if [ -z "$ACCEL_PPPD_OPTS" ]; then
+if [ -z "${ACCEL_PPPD_OPTS}" ]; then
   # Exit if no custom options are set and configuration file does not exists
-  test -f $CONFFILE || exit 0
-  ACCEL_PPPD_OPTS="-c $CONFFILE"
+  test -f "${CONFFILE}" || exit 0
+  ACCEL_PPPD_OPTS="-c ${CONFFILE}"
 fi
 
 
